@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gene Expression Fold Change - Publication Quality</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 40px;
+            background-color: #f8f9fa;
+        }
+        .publication-chart {
+            width: 1200px;
+            height: 700px;
+            margin: 0 auto;
+            background: white;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            padding: 30px;
+            border-radius: 8px;
+        }
+        .chart-title {
+            text-align: center;
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 20px;
+            color: #2c3e50;
+        }
+        .axis-label {
+            font-size: 12px;
+            font-weight: bold;
+            fill: #2c3e50;
+        }
+        .gene-label {
+            font-size: 9px;
+            font-weight: bold;
+            pointer-events: none;
+            fill: #000000; /* 所有标签字体改为黑色 */
+        }
+        .down-label {
+            /* 移除原来的红色字体样式，使用统一的黑色 */
+        }
+        .up-label {
+            /* 移除原来的蓝色字体样式，使用统一的黑色 */
+        }
+        .label-bg {
+            fill: white;
+            stroke-width: 0.8;
+            opacity: 0.95;
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.1));
+        }
+        .down-label-bg {
+            stroke: #3498db; /* 下调标签边框使用蓝色 */
+        }
+        .up-label-bg {
+            stroke: #e74c3c; /* 上调标签边框使用红色 */
+        }
+        .grid-line {
+            stroke: #ecf0f1;
+            stroke-width: 1;
+        }
+        .zero-line {
+            stroke: #7f8c8d;
+            stroke-width: 1.5;
+        }
+        .dot {
+            transition: r 0.2s;
+        }
+        .dot:hover {
+            r: 6;
+            stroke-width: 2;
+        }
+        .connector {
+            stroke: #95a5a6;
+            stroke-width: 0.8;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <div class="publication-chart">
+        <div class="chart-title">Gene Expression Fold Change Analysis</div>
+        <div id="chart"></div>
+    </div>
+
+    <script>
+        // 完整基因数据
+        const geneData = [
+            {name: "RSK1/2", value: -7.746822431}, {name: "ZBTB7C", value: -7.340021642}, {name: "CCNP", value: -5.114087225},
+            {name: "COL20A1", value: -3.317147454}, {name: "ARID3C", value: -1.938516539}, {name: "CFAP58", value: -1.779657794},
+            {name: "HEY1", value: -1.779558402}, {name: "ITPRIP", value: -1.754940398}, {name: "ITIH3", value: -1.712713839},
+            {name: "PCDHA7", value: -1.506231865}, {name: "H2BE1", value: -1.482728281}, {name: "BACH2", value: -1.429906018},
+            {name: "ADAMTSL2", value: -1.357912915}, {name: "EPPK1", value: -1.207226894}, {name: "QRFP", value: -1.132274959},
+            {name: "CACNA1H", value: -1.127446522}, {name: "H4C5", value: -1.057758187}, {name: "FBLL1", value: -1.041943323},
+            {name: "PRR29", value: -0.999801051}, {name: "FOSB", value: -0.985094056}, {name: "AMDHD1", value: -0.971862274},
+            {name: "NTRK1", value: -0.967571778}, {name: "IFI27", value: -0.938468129}, {name: "GPRC5D", value: -0.930080978},
+            {name: "MYRIP", value: -0.894740344}, {name: "TMEM132B", value: -0.874020847}, {name: "ADAMTS8", value: -0.81971944},
+            {name: "KIAA1217", value: -0.797147221}, {name: "CNTN1", value: -0.720933579}, {name: "RP1L1", value: -0.689111697},
+            {name: "VGF", value: -0.658964432}, {name: "CADM2", value: -0.657363985}, {name: "NFASC", value: -0.640078961},
+            {name: "ATP2B2", value: -0.617492239}, {name: "PLAUR", value: -0.584470511}, {name: "GABRR2", value: -0.581387535},
+            {name: "CACNA1A", value: -0.530187952}, {name: "GZMM", value: -0.514457028}, {name: "DGKB", value: -0.508368679},
+            {name: "TRIB1", value: -0.505029103}, {name: "SLC37A1", value: -0.500360664}, {name: "PPP1R2B", value: -0.459729759},
+            {name: "ALDOB", value: -0.430572079}, {name: "ZSWIM5", value: -0.410219102}, {name: "FLRT1", value: -0.365964285},
+            {name: "STOX2", value: -0.337052276}, {name: "ANK3", value: -0.32188816}, {name: "OSBP2", value: -0.320684814},
+            {name: "MROH2A", value: -0.307658614}, {name: "RSPH10B2", value: -0.294188064}, {name: "DOK7", value: -0.2761302},
+            {name: "TMC6", value: -0.232148767}, {name: "PATL2", value: -0.227934543}, {name: "YPEL2", value: -0.222701956},
+            {name: "SCN4A", value: -0.193857719}, {name: "JSRP1", value: -0.187936944}, {name: "CACNA1B", value: -0.18377258},
+            {name: "ALX4", value: -0.175928031}, {name: "NR4A2", value: -0.174020921}, {name: "ADGRB1", value: -0.16984597},
+            {name: "CD226", value: -0.162983021}, {name: "C1orf54", value: -0.154256342}, {name: "KCNJ1", value: -0.141950506},
+            {name: "TMEM236", value: -0.138888783}, {name: "KLHL32", value: -0.128866196}, {name: "SEC31B", value: -0.11192825},
+            {name: "TNS1", value: -0.108388873}, {name: "FGF22", value: -0.107160982}, {name: "RNF112", value: -0.103722211},
+            {name: "HSD17B14", value: -0.09951172}, {name: "FGF11", value: -0.098278061}, {name: "TSPAN9", value: -0.082073812},
+            {name: "CAMK2B", value: -0.081752739}, {name: "C16orf89", value: -0.080470773}, {name: "ASB2", value: -0.079464216},
+            {name: "NRCAM", value: -0.063267676}, {name: "NEFH", value: -0.062032067}, {name: "HIGD2B", value: -0.060324542},
+            {name: "OTOGL", value: -0.035943148}, {name: "SIDT1", value: -0.031775523}, {name: "H3C3", value: -0.012537272},
+            {name: "PXDN", value: 0.002657508}, {name: "ZNF423", value: 0.006190025}, {name: "C17orf100", value: 0.015059111},
+            {name: "HK3", value: 0.02098782}, {name: "RIMBP3B", value: 0.023081448}, {name: "HES7", value: 0.023633804},
+            {name: "NYAP1", value: 0.033515451}, {name: "LAD1", value: 0.04842201}, {name: "SCPEP1", value: 0.053810115},
+            {name: "SPATC1", value: 0.062383258}, {name: "SRMS", value: 0.063440542}, {name: "SLC6A16", value: 0.063463083},
+            {name: "FAM71F2", value: 0.068068742}, {name: "KIAA1614", value: 0.069078065}, {name: "PDE1A", value: 0.082339736},
+            {name: "DMP1", value: 0.082708482}, {name: "LRRC71", value: 0.083173132}, {name: "HIVEP3", value: 0.093045243},
+            {name: "SH2D6", value: 0.095329585}, {name: "NELL2", value: 0.106062669}, {name: "SERINC2", value: 0.106812805},
+            {name: "CACNA1I", value: 0.109977179}, {name: "KCNJ10", value: 0.116637211}, {name: "ALOX5AP", value: 0.123568158},
+            {name: "TMEM225B", value: 0.134874342}, {name: "CHAC1", value: 0.138741471}, {name: "LIPH", value: 0.146455051},
+            {name: "SDK2", value: 0.149705606}, {name: "ATP8A2", value: 0.151914118}, {name: "SLCO2A1", value: 0.152258785},
+            {name: "MX1", value: 0.155926531}, {name: "NECAB2", value: 0.165869971}, {name: "CYP4F11", value: 0.167399966},
+            {name: "PMEL", value: 0.16804138}, {name: "CLCNKB", value: 0.176142496}, {name: "MARVELD3", value: 0.176635955},
+            {name: "PIGR", value: 0.176923429}, {name: "LAX1", value: 0.180689599}, {name: "GPR25", value: 0.186855133},
+            {name: "C3AR1", value: 0.193782612}, {name: "FBXO2", value: 0.198460226}, {name: "SLC11A1", value: 0.198883837},
+            {name: "TMCC2", value: 0.204032234}, {name: "CAMK2A", value: 0.207663934}, {name: "IGSF8", value: 0.20781274},
+            {name: "ANKRD24", value: 0.208588495}, {name: "MCF2", value: 0.211826074}, {name: "CPNE5", value: 0.216062941},
+            {name: "H2BC8", value: 0.221548178}, {name: "NR4A1", value: 0.222300132}, {name: "CACNA2D4", value: 0.226839302},
+            {name: "TNN", value: 0.228086101}, {name: "IL2RB", value: 0.235249227}, {name: "DUSP13", value: 0.244254275},
+            {name: "DMBT1", value: 0.248357866}, {name: "CLIC2", value: 0.257686354}, {name: "MYL3", value: 0.263160516},
+            {name: "C15orf48", value: 0.269857552}, {name: "ABCC11", value: 0.299720131}, {name: "SMIM10L2B", value: 0.303233593},
+            {name: "SLC2A3", value: 0.303748114}, {name: "TXK", value: 0.315715467}, {name: "PTPRR", value: 0.324406966},
+            {name: "ADCY5", value: 0.333755795}, {name: "NCF1", value: 0.352639401}, {name: "GRIA3", value: 0.356886979},
+            {name: "CALHM1", value: 0.36296963}, {name: "CHRFAM7A", value: 0.364497566}, {name: "SGCA", value: 0.368778622},
+            {name: "DCT", value: 0.37459853}, {name: "CLCN4", value: 0.388821308}, {name: "COLGALT2", value: 0.393240683},
+            {name: "GIPR", value: 0.416326461}, {name: "ADRA1B", value: 0.422520792}, {name: "FRZB", value: 0.434723517},
+            {name: "MEIG1", value: 0.451772619}, {name: "SRGAP3", value: 0.463936827}, {name: "MAN1C1", value: 0.467120945},
+            {name: "IL3RA", value: 0.477118275}, {name: "CLGN", value: 0.480696376}, {name: "HHLA2", value: 0.494168822},
+            {name: "GPR19", value: 0.50583614}, {name: "NPAS1", value: 0.50714026}, {name: "JAKMIP3", value: 0.53886163},
+            {name: "H4C12", value: 0.540511069}, {name: "SEMA7A", value: 0.542418391}, {name: "PDE2A", value: 0.547067952},
+            {name: "PRG4", value: 0.553931566}, {name: "C2orf66", value: 0.574617615}, {name: "KRT17", value: 0.580975896},
+            {name: "ADORA1", value: 0.586328625}, {name: "TTC9B", value: 0.596780632}, {name: "SELPLG", value: 0.597110367},
+            {name: "LRRC4B", value: 0.626716712}, {name: "HLA-F", value: 0.647050895}, {name: "TOGARAM2", value: 0.651901829},
+            {name: "SLC6A19", value: 0.706073756}, {name: "TMEM269", value: 0.72076333}, {name: "FCER1G", value: 0.766996385},
+            {name: "RIMS4", value: 0.786070856}, {name: "MYEOV", value: 0.791858063}, {name: "CASTOR1", value: 0.810715736},
+            {name: "TBC1D3B", value: 0.831168376}, {name: "MLLT11", value: 0.886550767}, {name: "CEACAM1", value: 0.927079621},
+            {name: "CFAP46", value: 0.927898041}, {name: "ZNF469", value: 0.957721661}, {name: "CLCNKA", value: 0.970448852},
+            {name: "SLC23A3", value: 0.998278781}, {name: "RBFOX3", value: 1.017838511}, {name: "ENAM", value: 1.019032085},
+            {name: "RNF223", value: 1.059196364}, {name: "H4C4", value: 1.070465967}, {name: "UST", value: 1.116341796},
+            {name: "SDCBP2", value: 1.171952415}, {name: "RAET1E", value: 1.183509497}, {name: "TBC1D10C", value: 1.23724416},
+            {name: "GRIA4", value: 1.24605892}, {name: "VSTM2L", value: 1.255626722}, {name: "CNFN", value: 1.355603031},
+            {name: "HTRA1", value: 1.368642253}, {name: "ACHE", value: 1.382380753}, {name: "CACNA1S", value: 1.404558044},
+            {name: "NKX2-5", value: 1.434266132}, {name: "DCAF4L1", value: 1.445585162}, {name: "LRIG1", value: 1.446238624},
+            {name: "KRT83", value: 1.454566599}, {name: "SLIT1", value: 1.475244892}, {name: "EGF", value: 1.496139268},
+            {name: "CD59", value: 1.503989074}, {name: "RAP1GAP", value: 1.512393576}, {name: "SERPINA1", value: 1.516693421},
+            {name: "MYADML2", value: 1.769494442}, {name: "GRHL3", value: 1.827178976}, {name: "DEPTOR", value: 1.88961259},
+            {name: "H1-4", value: 1.914764781}, {name: "KLHL29", value: 1.942166864}, {name: "TNIP3", value: 2.103512605},
+            {name: "GAL3ST4", value: 2.174229979}, {name: "TRIML2", value: 2.269683124}, {name: "C9orf24", value: 2.474039323},
+            {name: "OR51B4", value: 2.543476402}, {name: "C1QTNF1", value: 2.70670533}, {name: "GPR37L1", value: 3.337861757}
+        ];
+
+        // 设置尺寸和边距
+        const margin = {top: 50, right: 150, bottom: 70, left: 150};
+        const width = 1200 - margin.left - margin.right;
+        const height = 600 - margin.top - margin.bottom;
+
+        // 创建SVG
+        const svg = d3.select("#chart")
+            .append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom)
+            .append("g")
+            .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        // 设置比例尺
+        const xScale = d3.scaleLinear()
+            .domain([0, geneData.length - 1])
+            .range([0, width]);
+
+        const yScale = d3.scaleLinear()
+            .domain([-9, 4])
+            .range([height, 0]);
+
+        // 添加网格线 - 直接设置透明度为0.3（更浅）
+        svg.append("g")
+            .attr("class", "grid-line")
+            .call(d3.axisLeft(yScale)
+                .ticks(10)
+                .tickSize(-width)
+                .tickFormat(""))
+            .style("opacity", 0.3); // 直接设置透明度为30%
+
+        // 添加坐标轴
+        svg.append("g")
+            .attr("transform", `translate(0,${height})`)
+            .call(d3.axisBottom(xScale).ticks(10));
+
+        svg.append("g")
+            .call(d3.axisLeft(yScale).ticks(10));
+
+        // 添加坐标轴标签
+        svg.append("text")
+            .attr("class", "axis-label")
+            .attr("transform", "rotate(-90)")
+            .attr("y", -70)
+            .attr("x", -height / 2)
+            .attr("text-anchor", "middle")
+            .text("log₂(RFP/GFP fold change)");
+
+        svg.append("text")
+            .attr("class", "axis-label")
+            .attr("x", width / 2)
+            .attr("y", height + 50)
+            .attr("text-anchor", "middle")
+            .text("Gene Index");
+
+        // 添加零线
+        svg.append("line")
+            .attr("class", "zero-line")
+            .attr("x1", 0)
+            .attr("x2", width)
+            .attr("y1", yScale(0))
+            .attr("y2", yScale(0));
+
+        // 创建颜色比例尺 - 反转红蓝配色
+        const colorScale = d3.scaleDiverging(d3.interpolateRdBu)
+            .domain([3, 0, -8]); // 反转域的顺序
+
+        // 绘制散点
+        svg.selectAll(".dot")
+            .data(geneData)
+            .enter().append("circle")
+            .attr("class", "dot")
+            .attr("cx", (d, i) => xScale(i))
+            .attr("cy", d => yScale(d.value))
+            .attr("r", 3.5)
+            .style("fill", d => colorScale(d.value))
+            .style("stroke", "#2c3e50")
+            .style("stroke-width", 0.8);
+
+        // 找出上下调最显著的基因
+        const topDown = [...geneData].sort((a, b) => a.value - b.value).slice(0, 10);
+        const topUp = [...geneData].sort((a, b) => b.value - a.value).slice(0, 10);
+
+        // 改进的标签布局 - 确保标签不遮挡散点且在画幅内
+        function createProximityLabels(genes, isUp) {
+            const labels = [];
+            const occupiedPositions = new Set();
+            const dotRadius = 4; // 散点半径
+            
+            // 按x位置排序
+            const sortedGenes = [...genes].sort((a, b) => {
+                const indexA = geneData.findIndex(d => d.name === a.name);
+                const indexB = geneData.findIndex(d => d.name === b.name);
+                return indexA - indexB;
+            });
+            
+            sortedGenes.forEach((gene, index) => {
+                const geneIndex = geneData.findIndex(d => d.name === gene.name);
+                const x = xScale(geneIndex);
+                const y = yScale(gene.value);
+                
+                // 标签位置 - 靠近数据点
+                const offsetX = isUp ? -35 : 35; // 上调在左，下调在右
+                const labelX = x + offsetX;
+                
+                // 检查标签是否超出画幅边界
+                const labelWidth = 50;
+                const labelHeight = 14;
+                let adjustedLabelX = labelX;
+                
+                // 确保标签在画幅内
+                if (isUp && labelX - labelWidth/2 < -margin.left + 10) {
+                    adjustedLabelX = -margin.left + 10 + labelWidth/2;
+                } else if (!isUp && labelX + labelWidth/2 > width + margin.right - 10) {
+                    adjustedLabelX = width + margin.right - 10 - labelWidth/2;
+                }
+                
+                // 寻找合适的垂直位置
+                let bestY = y;
+                let level = 0;
+                let foundPosition = false;
+                
+                while (!foundPosition && level < 15) {
+                    const testY = y + (level % 2 === 0 ? level * 12 : -level * 12);
+                    
+                    // 检查这个位置是否可用
+                    let positionAvailable = true;
+                    
+                    // 1. 检查是否与其他标签重叠
+                    for (let occupied of occupiedPositions) {
+                        const [occupiedX, occupiedY] = occupied.split(',').map(Number);
+                        if (Math.abs(adjustedLabelX - occupiedX) < 45 && Math.abs(testY - occupiedY) < 18) {
+                            positionAvailable = false;
+                            break;
+                        }
+                    }
+                    
+                    // 2. 检查是否遮挡散点
+                    if (positionAvailable) {
+                        for (let dot of geneData) {
+                            const dotIndex = geneData.findIndex(d => d.name === dot.name);
+                            const dotX = xScale(dotIndex);
+                            const dotY = yScale(dot.value);
+                            
+                            // 计算标签边界
+                            const labelLeft = adjustedLabelX - labelWidth/2;
+                            const labelRight = adjustedLabelX + labelWidth/2;
+                            const labelTop = testY - labelHeight/2;
+                            const labelBottom = testY + labelHeight/2;
+                            
+                            // 检查散点是否在标签范围内
+                            if (dotX >= labelLeft && dotX <= labelRight && 
+                                dotY >= labelTop && dotY <= labelBottom) {
+                                positionAvailable = false;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // 3. 检查是否在画幅内
+                    if (positionAvailable) {
+                        if (testY - labelHeight/2 < 0 || testY + labelHeight/2 > height) {
+                            positionAvailable = false;
+                        }
+                    }
+                    
+                    if (positionAvailable) {
+                        bestY = testY;
+                        foundPosition = true;
+                        occupiedPositions.add(`${adjustedLabelX},${bestY}`);
+                    }
+                    
+                    level++;
+                }
+                
+                labels.push({
+                    gene,
+                    x,
+                    y,
+                    labelX: adjustedLabelX,
+                    labelY: bestY,
+                    isUp
+                });
+            });
+            
+            return labels;
+        }
+
+        // 创建标签
+        const downLabels = createProximityLabels(topDown, false);
+        const upLabels = createProximityLabels(topUp, true);
+
+        // 绘制下调基因标签（右侧）- 字体黑色，边框蓝色
+        downLabels.forEach(item => {
+            // 短连接线 - 蓝色
+            svg.append("line")
+                .attr("class", "connector")
+                .attr("x1", item.x + 4)
+                .attr("y1", item.y)
+                .attr("x2", item.labelX - 12)
+                .attr("y2", item.labelY)
+                .style("stroke", "#3498db"); // 蓝色
+
+            // 背景框 - 蓝色边框
+            svg.append("rect")
+                .attr("class", "label-bg down-label-bg")
+                .attr("x", item.labelX - 25)
+                .attr("y", item.labelY - 7)
+                .attr("width", 50)
+                .attr("height", 14)
+                .attr("rx", 3);
+
+            // 基因名称 - 黑色
+            svg.append("text")
+                .attr("class", "gene-label")
+                .attr("x", item.labelX)
+                .attr("y", item.labelY + 2)
+                .attr("text-anchor", "middle")
+                .text(item.gene.name);
+        });
+
+        // 绘制上调基因标签（左侧）- 字体黑色，边框红色
+        upLabels.forEach(item => {
+            // 短连接线 - 红色
+            svg.append("line")
+                .attr("class", "connector")
+                .attr("x1", item.x - 4)
+                .attr("y1", item.y)
+                .attr("x2", item.labelX + 12)
+                .attr("y2", item.labelY)
+                .style("stroke", "#e74c3c"); // 红色
+
+            // 背景框 - 红色边框
+            svg.append("rect")
+                .attr("class", "label-bg up-label-bg")
+                .attr("x", item.labelX - 25)
+                .attr("y", item.labelY - 7)
+                .attr("width", 50)
+                .attr("height", 14)
+                .attr("rx", 3);
+
+            // 基因名称 - 黑色
+            svg.append("text")
+                .attr("class", "gene-label")
+                .attr("x", item.labelX)
+                .attr("y", item.labelY + 2)
+                .attr("text-anchor", "middle")
+                .text(item.gene.name);
+        });
+
+    </script>
+</body>
+</html>
