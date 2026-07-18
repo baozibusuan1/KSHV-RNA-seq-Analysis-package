@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+KSHV转录组分析 - Fig4 整合版 (BCBL-1 + iSLK-BAC16 双细胞系)
+- 路径: D:\博士学习\S11W3\生信改后\raw data
+- 只保留 BCBL-1 和 iSLK-BAC16 数据
+- 文件名含 0519
+- 配色协调：基于蓝-白-红分叉色系，GO用红/蓝/绿，KEGG用橙/浅蓝
+- 通路名称字体高易读性，Arial字体
+- 只保留两细胞系都有数据的通路
+"""
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import gseapy as gp
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# ================= 1. 全局配置 =================
+BASE_DIR = r"D:\博士学习\S11W3\生信改后\raw data"
+OUTPUT_DIR = os.path.join(BASE_DIR, "Fig4_Output")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['svg.fonttype'] = 'none'
+
+# ----- 协调配色方案 -----
+# GO 颜色卡（与fixed ok py的学术风格协调）
+COLOR_GO_BP = '#C0392B'   # 生物学过程 (深红)
+COLOR_GO_CC = '#2980B9'   # 细胞组分 (深蓝)
+COLOR_GO_MF = '#27AE60'   # 分子功能 (翠绿)
+
+# KEGG GSEA 颜色卡（与fixed ok py的蓝白红分叉色系协调）
+COLOR_KEGG_LYTIC  = '#E67E22'   # Lytic 激活 (暖橙，比原色稍深更协调)
+COLOR_KEGG_LATENT = '#5DADE2'   # Latent 富集 (天蓝，与深蓝系协调)
+
+# 辅助色
+COLOR_GRID = '#E8E8E8'    # 网格线
+COLOR_SPINE = '#BBBBBB'   # 边框
+COLOR_TEXT = '#2C3E50'    # 主文字
+
+# ================= 2. 数据读取与预处理 =================
+def load_and_prep_deg(filepath):
+    """读取DESeq数据，统一列名并清洗"""
+    df = pd.read_excel(filepath)
+
+    if 'Name' in df.columns:
+        df.rename(columns={'Name': 'Gene_Name'}, inplace=True)
+    if 'padj' in df.columns:
+        df.rename(columns={'padj': 'FDR'}, inplace=True)
+
+    df.dropna(subset=['Gene_Name', 'log2FoldChange'], inplace=True)
+    df['Gene_Name'] = df['Gene_Name'].astype(str).str.strip()
+    df = df[~df['Gene_Name'].isin(['-', 'nan', 'NaN', ''])]
+    return df
+
+print("📂 正在加载数据...")
+deg_ib6 = load_and_prep_deg(os.path.join(BASE_DIR, "IB6CON_vs_IB6T.DESeq0519.xlsx"))
+deg_bl  = load_and_prep_deg(os.path.join(BASE_DIR, "BLCON_vs_BLT.DESeq0519.xlsx"))
+
+# ================= 3. 辅助函数：获取显著基因 =================
+def get_sig_genes(df):
+    """获取显著差异基因 (FDR < 0.05, |log2FC| > 1)"""
+    return set(df[(df['FDR'] < 0.05) & (df['log2FoldChange'].abs() > 1)]['Gene_Name'])
+
+# ================= 4. Fig 4A：合并 GO 分析（两细胞系共有基因） =================
+def plot_merged_go():
+    print("🧬 正在提取 BCBL-1 与 iSLK-BAC16 的共有基因进行合并 GO 富集...")
+
+    sig_ib6 = get_sig_genes(deg_ib6)
+    sig_bl = get_sig_genes(deg_bl)
+
+    # 取两细胞系共有基因 (Intersection)
+    merged_genes = list(sig_ib6 & sig_bl)
+
+    # 防错：如果共有基因太少，取并集
+    if len(merged_genes) < 15:
+        print("⚠️ 共有基因过少，自动切换为并集以保证 GO 分析稳定性...")
+        merged_genes = list(sig_ib6 | sig_bl)
+
+    print(f"📊 用于合并 GO 分析的基因总数: {len(merged_genes)}")
+
+    go_results = {}
+    categories = {
+        'GO_Biological_Process_2021':   ('Biological processes', COLOR_GO_BP),
+        'GO_Cellular_Component_2021':   ('Cellular components', COLOR_GO_CC),
+        'GO_Molecular_Function_2021':   ('Molecular functions', COLOR_GO_MF)
+    }
+
+    for db, (title, color) in categories.items():
+        enr = gp.enrichr(gene_list=merged_genes, gene_sets=db, organism='human', outdir=None)
+        res = enr.results
+        sig_res = res[res['Adjusted P-value'] < 0.05].head(15)
+        sig_res['Term_Clean'] = sig_res['Term'].apply(lambda x: x.split(' (GO:')[0])
+        sig_res['Count'] = sig_res['Overlap'].apply(lambda x: int(x.split('/')[0]))
+        go_results[title] = (sig_res.sort_values('Count', ascending=False), color)
+
+    # 绘图：1行3列
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7), sharey=False)
+    fig.suptitle("Gene Ontology Analysis (Merged Core Genes)", 
+                 fontsize=18, fontweight='bold', y=1.02, color=COLOR_TEXT)
+
+    for ax, (title, (data, color)) in zip(axes, go_results.items()):
+        if data.empty:
+            ax.set_title(f"{title}\n(No Significant Terms)", fontsize=13, fontweight='bold', color='#999999')
+            ax.axis('off')
+            continue
+
+        # 使用seaborn barplot
+        sns.barplot(x='Term_Clean', y='Count', data=data, color=color, ax=ax, 
+                    edgecolor='white', linewidth=0.5)
+
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=12, color=COLOR_TEXT)
+        ax.set_xlabel("")
+        ax.set_ylabel("Gene Count" if ax == axes[0] else "", fontsize=12, color=COLOR_TEXT)
+
+        # 通路名称旋转45度，字体大小适中
+        labels = ax.get_xticklabels()
+        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=9, 
+                          fontname='Arial', color=COLOR_TEXT)
+
+        # Y轴刻度
+        ax.tick_params(axis='y', labelsize=10, colors=COLOR_TEXT)
+        ax.set_ylim(0, data['Count'].max() * 1.15)
+
+        # 数值标签
+        for p in ax.patches:
+            height = p.get_height()
+            ax.annotate(f'{int(height)}', 
+                        (p.get_x() + p.get_width() / 2., height), 
+                        ha='center', va='bottom', fontsize=8, 
+                        fontname='Arial', color=COLOR_TEXT,
+                        xytext=(0, 3), textcoords='offset points')
+
+        # 边框美化
+        for spine in ax.spines.values():
+            spine.set_color(COLOR_SPINE)
+            spine.set_linewidth(0.8)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        # 网格线
+        ax.yaxis.grid(True, linestyle='--', alpha=0.3, color=COLOR_GRID)
+        ax.set_axisbelow(True)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "Fig4A_Merged_GO_Analysis.pdf"), 
+                dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(OUTPUT_DIR, "Fig4A_Merged_GO_Analysis.svg"), 
+                dpi=300, bbox_inches='tight')
+    plt.close()
+    print("✅ Fig4A 合并 GO 分析完成")
+
+# ================= 5. 辅助函数：运行 GSEA 并提取共有通路 =================
+def run_kegg_gsea(df):
+    """运行KEGG GSEA并返回结果"""
+    rnk = df[['Gene_Name', 'log2FoldChange']].copy().dropna()
+    rnk = rnk.sort_values('log2FoldChange', ascending=False)
+
+    try:
+        gsea_res = gp.prerank(rnk=rnk, gene_sets='KEGG_2021_Human', 
+                              min_size=5, max_size=1000, 
+                              permutation_num=100, outdir=None, seed=42)
+        res_df = gsea_res.res2d.copy()
+        res_df['Term_Clean'] = res_df['Term'].apply(lambda x: x.split(' - Homo')[0])
+        return res_df
+    except Exception as e:
+        print(f"⚠️ GSEA 计算失败: {e}")
+        return pd.DataFrame()
+
+def get_common_pathways(res_ib6, res_bl, direction='lytic', top_n=12):
+    """
+    提取两细胞系共有的通路
+    direction: 'lytic' (NES>0) 或 'latent' (NES<0)
+    只保留两细胞系都有的通路名称
+    """
+    if res_ib6.empty or res_bl.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # 筛选方向和显著性
+    if direction == 'lytic':
+        ib6_sig = res_ib6[(res_ib6['FDR q-val'] < 0.25) & (res_ib6['NES'] > 0)]
+        bl_sig = res_bl[(res_bl['FDR q-val'] < 0.25) & (res_bl['NES'] > 0)]
+        ib6_sorted = ib6_sig.sort_values('NES', ascending=False)
+        bl_sorted = bl_sig.sort_values('NES', ascending=False)
+    else:
+        ib6_sig = res_ib6[(res_ib6['FDR q-val'] < 0.25) & (res_ib6['NES'] < 0)]
+        bl_sig = res_bl[(res_bl['FDR q-val'] < 0.25) & (res_bl['NES'] < 0)]
+        ib6_sorted = ib6_sig.sort_values('NES', ascending=True)
+        bl_sorted = bl_sig.sort_values('NES', ascending=True)
+
+    # 取top N
+    ib6_top = ib6_sorted.head(top_n)
+    bl_top = bl_sorted.head(top_n)
+
+    # 找共有通路
+    ib6_terms = set(ib6_top['Term_Clean'])
+    bl_terms = set(bl_top['Term_Clean'])
+    common_terms = ib6_terms & bl_terms
+
+    # 如果共有通路太少，放宽为各自top中的交集（不限于显著性）
+    if len(common_terms) < 3:
+        ib6_all = res_ib6[res_ib6['NES'] > 0] if direction == 'lytic' else res_ib6[res_ib6['NES'] < 0]
+        bl_all = res_bl[res_bl['NES'] > 0] if direction == 'lytic' else res_bl[res_bl['NES'] < 0]
+        ib6_all = ib6_all.sort_values('NES', ascending=False if direction=='lytic' else True).head(top_n*2)
+        bl_all = bl_all.sort_values('NES', ascending=False if direction=='lytic' else True).head(top_n*2)
+        common_terms = set(ib6_all['Term_Clean']) & set(bl_all['Term_Clean'])
+
+    # 提取共有通路数据（使用两细胞系NES均值排序）
+    ib6_common = ib6_sorted[ib6_sorted['Term_Clean'].isin(common_terms)].copy()
+    bl_common = bl_sorted[bl_sorted['Term_Clean'].isin(common_terms)].copy()
+
+    # 合并计算平均NES
+    merged = pd.merge(
+        ib6_common[['Term_Clean', 'NES']].rename(columns={'NES': 'NES_ib6'}),
+        bl_common[['Term_Clean', 'NES']].rename(columns={'NES': 'NES_bl'}),
+        on='Term_Clean', how='inner'
+    )
+    merged['NES_avg'] = (merged['NES_ib6'] + merged['NES_bl']) / 2
+    merged = merged.sort_values('NES_avg', ascending=False if direction=='lytic' else True)
+
+    # 取合并后top N
+    final_terms = merged['Term_Clean'].head(top_n).tolist()
+
+    # 返回各自的结果（只保留共有通路）
+    ib6_final = ib6_sorted[ib6_sorted['Term_Clean'].isin(final_terms)].copy()
+    bl_final = bl_sorted[bl_sorted['Term_Clean'].isin(final_terms)].copy()
+
+    # 按合并后的顺序排序
+    term_order = {t: i for i, t in enumerate(final_terms)}
+    ib6_final['order'] = ib6_final['Term_Clean'].map(term_order)
+    bl_final['order'] = bl_final['Term_Clean'].map(term_order)
+    ib6_final = ib6_final.sort_values('order')
+    bl_final = bl_final.sort_values('order')
+
+    return ib6_final, bl_final
+
+# ================= 6. Fig 4B-E：KEGG GSEA 双向柱状图（只保留共有通路） =================
+def plot_common_kegg_gsea(res_ib6, res_bl, direction, color, filename_suffix):
+    """
+    绘制两细胞系共有的KEGG通路
+    direction: 'lytic' 或 'latent'
+    """
+    ib6_df, bl_df = get_common_pathways(res_ib6, res_bl, direction=direction, top_n=12)
+
+    if ib6_df.empty or bl_df.empty:
+        print(f"⚠️ {direction} 方向无共有通路，跳过绘图")
+        return
+
+    # 准备合并绘图数据
+    ib6_plot = ib6_df[['Term_Clean', 'NES']].copy()
+    ib6_plot['Cell'] = 'iSLK-BAC16'
+    bl_plot = bl_df[['Term_Clean', 'NES']].copy()
+    bl_plot['Cell'] = 'BCBL-1'
+
+    plot_df = pd.concat([ib6_plot, bl_plot], ignore_index=True)
+
+    # 获取通路顺序（按NES绝对值均值排序）
+    term_avg = plot_df.groupby('Term_Clean')['NES'].apply(lambda x: x.abs().mean()).sort_values(ascending=False)
+    term_order = term_avg.index.tolist()
+
+    # 创建图形：并排显示两个细胞系
+    n_terms = len(term_order)
+    fig_height = max(5, n_terms * 0.55)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, fig_height), 
+                                   gridspec_kw={'width_ratios': [1, 1], 'wspace': 0.35})
+
+    # 统一Y轴顺序（反向，让大的在上）
+    y_pos = np.arange(n_terms)
+
+    # --- iSLK-BAC16 ---
+    ib6_data = ib6_plot.set_index('Term_Clean').reindex(term_order)
+    ax1.barh(y_pos, ib6_data['NES'].values, color=color, edgecolor='white', linewidth=0.5, height=0.6)
+    ax1.set_yticks(y_pos)
+    ax1.set_yticklabels(term_order, fontsize=10, fontname='Arial', color=COLOR_TEXT)
+    ax1.invert_yaxis()
+    ax1.set_xlabel("NES", fontsize=11, fontname='Arial', color=COLOR_TEXT)
+    ax1.set_title("iSLK-BAC16", fontsize=13, fontname='Arial', fontweight='bold', 
+                  color=COLOR_TEXT, pad=10)
+    ax1.axvline(0, color='#333333', linewidth=0.8)
+
+    # 添加数值标签
+    for i, (idx, row) in enumerate(ib6_data.iterrows()):
+        val = row['NES']
+        offset = 0.05 if val >= 0 else -0.05
+        ha = 'left' if val >= 0 else 'right'
+        ax1.annotate(f'{val:.2f}', (val, i), fontsize=8, fontname='Arial',
+                    ha=ha, va='center', color=COLOR_TEXT,
+                    xytext=(3 if val >= 0 else -3, 0), textcoords='offset points')
+
+    # --- BCBL-1 ---
+    bl_data = bl_plot.set_index('Term_Clean').reindex(term_order)
+    ax2.barh(y_pos, bl_data['NES'].values, color=color, edgecolor='white', linewidth=0.5, height=0.6)
+    ax2.set_yticks(y_pos)
+    ax2.set_yticklabels(term_order, fontsize=10, fontname='Arial', color=COLOR_TEXT)
+    ax2.invert_yaxis()
+    ax2.set_xlabel("NES", fontsize=11, fontname='Arial', color=COLOR_TEXT)
+    ax2.set_title("BCBL-1", fontsize=13, fontname='Arial', fontweight='bold', 
+                  color=COLOR_TEXT, pad=10)
+    ax2.axvline(0, color='#333333', linewidth=0.8)
+
+    for i, (idx, row) in enumerate(bl_data.iterrows()):
+        val = row['NES']
+        ha = 'left' if val >= 0 else 'right'
+        ax2.annotate(f'{val:.2f}', (val, i), fontsize=8, fontname='Arial',
+                    ha=ha, va='center', color=COLOR_TEXT,
+                    xytext=(3 if val >= 0 else -3, 0), textcoords='offset points')
+
+    # 统一X轴范围
+    x_max = max(plot_df['NES'].abs().max() * 1.3, 0.5)
+    for ax in [ax1, ax2]:
+        ax.set_xlim(-x_max, x_max)
+        for spine in ax.spines.values():
+            spine.set_color(COLOR_SPINE)
+            spine.set_linewidth(0.8)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.tick_params(axis='x', labelsize=9, colors=COLOR_TEXT)
+        ax.xaxis.grid(True, linestyle='--', alpha=0.3, color=COLOR_GRID)
+        ax.set_axisbelow(True)
+
+    # 总标题
+    direction_title = "Lytic Activation (NES > 0)" if direction == 'lytic' else "Latent Enrichment (NES < 0)"
+    fig.suptitle(f"KEGG Common Pathways — {direction_title}", 
+                 fontsize=15, fontname='Arial', fontweight='bold', 
+                 color=COLOR_TEXT, y=1.02)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, f"Fig4_KEGG_Common_{filename_suffix}.pdf"), 
+                dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(OUTPUT_DIR, f"Fig4_KEGG_Common_{filename_suffix}.svg"), 
+                dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✅ KEGG Common {direction} 完成 | 共有通路数: {n_terms}")
+
+# ================= 7. 主程序 =================
+if __name__ == '__main__':
+    # 1. 合并 GO 分析
+    plot_merged_go()
+
+    # 2. KEGG GSEA 分析
+    print("\n🔄 正在计算 KEGG GSEA...")
+    res_ib6 = run_kegg_gsea(deg_ib6)
+    res_bl = run_kegg_gsea(deg_bl)
+
+    if not res_ib6.empty and not res_bl.empty:
+        # Lytic 方向（NES > 0）
+        plot_common_kegg_gsea(res_ib6, res_bl, 'lytic', COLOR_KEGG_LYTIC, 'Lytic')
+        # Latent 方向（NES < 0）
+        plot_common_kegg_gsea(res_ib6, res_bl, 'latent', COLOR_KEGG_LATENT, 'Latent')
+
+    print("\n🎉 Fig 4 所有分析图表已成功生成！")
