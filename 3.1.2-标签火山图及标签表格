@@ -1,0 +1,776 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+火山图标注脚本 - 按基因池优先级分配
+- 基因池：截图中的20个基因（排除RSK1/2）
+- 优先级：TNIP3/CADM2/DEPTOR/RAP1GAP → 通路代表 → 其他
+- 每侧不超过12个
+- TNIP3独立红色高亮
+工作路径: D:\\博士学习\\S11W3\\生信改后\\raw data
+"""
+
+import os
+import sys
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+
+try:
+    from adjustText import adjust_text
+except ImportError:
+    print("❌ 错误：未检测到 adjustText 库，请先在终端运行：pip install adjustText")
+    sys.exit(1)
+
+# ===================== 1. 美学与学术配色设置 =====================
+color_up = '#B2182B'
+color_down = '#2166AC'
+color_ns = '#EBF0F2'
+
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['axes.linewidth'] = 1.5
+plt.rcParams['xtick.major.width'] = 1.5
+plt.rcParams['ytick.major.width'] = 1.5
+plt.rcParams['axes.unicode_minus'] = False
+
+data_dir = r"D:\\博士学习\\S11W3\\生信改后\\raw data"
+p_threshold = 0.05
+log2fc_threshold = 1.0
+
+# ===================== 基因池定义（来自截图表格，排除RSK1/2）=====================
+
+# 核心基因（最高优先级）
+core_genes = ['TNIP3', 'CADM2', 'DEPTOR', 'RAP1GAP']
+
+# 完整基因池（下调侧，排除RSK1/2）
+# 优先显示截图基因 + 共下调基因 + 通路相关基因
+gene_pool_down = [
+    # 截图基因
+    'ZBTB7C', 'CCNP', 'COL20A1', 'ARID3C', 'CFAP58',
+    'HEY1', 'ITPRIP', 'ITIH3', 'PCDHA7',
+    # 共下调基因（用户指定）
+    'STARD9', 'MDM4', 'NPR2', 'PIF1', 'TTC28', 'RCCD1', 'PDE1C',
+    'SLC2A4RG', 'PLCXD1', 'RAB26', 'MAP2K6', 'KRTCAP2', 'MAMDC4',
+    'ARL4C', 'TRIM46', 'CDK5RAP3', 'MUC1', 'TESMIN', 'SEC31B', 'GPR160',
+    # 通路相关下调候选
+    'SQSTM1', 'BECN1', 'MAP1LC3B', 'ATG4A', 'ATG2B', 'AMBRA1', 'ULK1', 'ULK2',
+    'NFKB1', 'RELA', 'CHUK', 'IKBKB', 'NFKB2',
+    'MTOR', 'RPTOR', 'RICTOR', 'RPS6KB1', 'RPS6KB2',
+    'AKT1', 'AKT2', 'PIK3CA', 'PIK3CB',
+    'DEPTOR', 'RAP1GAP', 'TNIP3', 'CADM2'
+]
+
+# 完整基因池（上调侧）
+# 优先显示截图基因，同时允许通路相关基因补充
+gene_pool_up = [
+    'DEPTOR', 'H1-4', 'KLHL29', 'TNIP3', 'GAL3ST4',
+    'TRIML2', 'C9orf24', 'OR51B4', 'C1QTNF1', 'GPR37L1',
+    # 通路相关上调候选
+    'SQSTM1', 'BECN1', 'MAP1LC3B', 'ATG4A', 'ATG2B', 'AMBRA1', 'ULK1', 'ULK2',
+    'NFKB1', 'RELA', 'CHUK', 'IKBKB', 'NFKB2',
+    'MTOR', 'RPTOR', 'RICTOR', 'RPS6KB1', 'RPS6KB2',
+    'AKT1', 'AKT2', 'PIK3CA', 'PIK3CB',
+    'RAP1GAP', 'CADM2'
+]
+
+# 合并去重
+all_pool_genes = list(dict.fromkeys(gene_pool_down + gene_pool_up))
+
+# 通路关键词（精细化分类，用于判断通路代表性）
+PATHWAY_KEYWORDS = {
+    'Autophagy - core': ['04140', 'autophagy', 'ulk1', 'ulk2', 'atg4', 'atg2', 'atg9', 'atg14', 'ambra1'],
+    'Autophagy - receptor': ['sqstm1', 'p62', 'optn', 'nbnr1', 'calcco2'],
+    'Autophagy - LC3': ['map1lc3', 'lc3', 'gatd16'],
+    'Autophagy - Beclin': ['becn1', 'beclin'],
+    'mTOR - core': ['04150', 'mtor', 'mammalian target'],
+    'mTOR - DEPTOR': ['deptor'],
+    'mTOR - Raptor/Rictor': ['rptor', 'rictor', 'mlst8'],
+    'mTOR - S6K': ['rps6k', 'rps6kb', 's6k'],
+    'PI3K-Akt - PI3K': ['pi3k', 'pik3ca', 'pik3cb', 'pik3cd', 'pik3r'],
+    'PI3K-Akt - AKT': ['akt1', 'akt2', 'akt3'],
+    'PI3K-Akt - TSC': ['tsc1', 'tsc2'],
+    'NF-kappa B - core': ['nfkb1', 'nfkb2', 'rela', 'relb', 'reld'],
+    'NF-kappa B - IKK': ['chuk', 'ikk', 'ikbkb', 'ikbke'],
+    'NF-kappa B - inhibitor': ['nfkbia', 'nfkbib', 'ikba'],
+    'KSHV infection': ['05167', 'kaposi', 'kshv', 'herpesvirus 8', 'hhv8'],
+    'KSHV - TNIP3/A20': ['tnip3', 'tnfaip3', 'a20'],
+    'KSHV - cytokine': ['il6', 'il10', 'vegf', 'il17'],
+    'Histone': ['hist1h', 'hist2h', 'h2b', 'h3c', 'h4c', 'h1-4'],
+    'Cell cycle': ['ccnp', 'ccna', 'ccnb', 'ccnd', 'cdk'],
+    'Transcription factor': ['hey1', 'arid3', 'bhlhe', 'gata'],
+    'Cytoskeleton': ['cfap', 'ttc', 'krt', 'tubb'],
+    'Neuronal': ['pcdh', 'nrxn', 'nlgn', 'cadm2'],
+    'GPCR': ['gpr', 'adgr', 'gria'],
+    'Metabolism': ['aldo', 'hk', 'g6pd', 'pgk'],
+    'Immune response': ['trim', 'ifit', 'mx', 'oas', 'irf'],
+    'Proteasome/UPS': ['psm', 'ubb', 'ube2', 'fbxo'],
+    'Apoptosis': ['bcl2', 'bax', 'casp', 'xiap'],
+    'DNA repair': ['rad', 'brca', 'atm', 'atr'],
+    'RNA processing': ['rbm', 'srsf', 'hnrn'],
+    'Splicing': ['srsf', 'rbfox', 'mbnl'],
+    'Translation': ['eif', 'rps', 'rpl']
+}
+
+# 全局记录
+label_records = []
+
+# ===================== 共下调/共上调基因查找 =====================
+def find_common_regulated_genes(cell_data_dict, direction='down'):
+    """
+    找出多个细胞系共同下调或共同上调的基因
+    cell_data_dict: {cell_name: df}
+    direction: 'down' 或 'up'
+    """
+    sets = {}
+    for cell_name, df in cell_data_dict.items():
+        sig = df[(df['padj'] < 0.05) & (df['log2FoldChange'].abs() >= 1.0)]
+        if direction == 'down':
+            sets[cell_name] = set(sig[sig['log2FoldChange'] < 0]['Name'].tolist())
+        else:
+            sets[cell_name] = set(sig[sig['log2FoldChange'] > 0]['Name'].tolist())
+
+    if len(sets) < 2:
+        return set()
+
+    common = set.intersection(*sets.values())
+    return common
+
+# ===================== 2. 数据清洗 =====================
+def clean_data(df):
+    df = df.replace(['NA', 'NaN', 'inf', '-inf', 'Inf', '-Inf'], np.nan)
+    for c in ['log2FoldChange', 'pval', 'padj']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.dropna(subset=['log2FoldChange', 'padj', 'Name'])
+    df = df[np.isfinite(df['log2FoldChange']) & np.isfinite(df['padj'])]
+    df['Name'] = df['Name'].astype(str).str.strip().str.upper()
+    df = df[(df['Name'] != 'NAN') & (df['Name'] != '-')]
+    min_p = df.loc[df['padj'] > 0, 'padj'].min() if (df['padj'] > 0).any() else 1e-300
+    df.loc[df['padj'] <= 0, 'padj'] = min_p
+    df['log_p'] = -np.log10(df['padj'])
+    df = df[np.isfinite(df['log_p'])]
+    return df
+
+# ===================== 数据范围过滤 =====================
+def filter_data_range(df, x_min=-6.0, x_max=6.0, y_max=100.0):
+    """
+    过滤数据范围：
+    - 横坐标 log2FC: -6 到 +6
+    - 纵坐标 -log10(padj): 0 到 100
+    只保留这个范围内的数据进行标注
+    """
+    filtered = df[
+        (df['log2FoldChange'] >= x_min) & 
+        (df['log2FoldChange'] <= x_max) &
+        (df['log_p'] >= 0) &
+        (df['log_p'] <= y_max)
+    ].copy()
+
+    excluded = df[
+        (df['log2FoldChange'] < x_min) | 
+        (df['log2FoldChange'] > x_max) |
+        (df['log_p'] > y_max)
+    ]
+
+    if len(excluded) > 0:
+        print(f"   ⚠️ 过滤掉范围外数据: {len(excluded)} 个基因")
+        print(f"      范围: log2FC [{x_min}, {x_max}], -log10(padj) [0, {y_max}]")
+
+    return filtered
+
+def get_pathways(row):
+    """获取基因所属精细通路列表"""
+    kegg = str(row.get('KEGG', '')).lower()
+    desc = str(row.get('Description', '')).lower()
+    text = kegg + ' ' + desc
+    pathways = []
+    for pname, keywords in PATHWAY_KEYWORDS.items():
+        if any(k in text for k in keywords):
+            pathways.append(pname)
+    return pathways
+
+def get_primary_pathway(row):
+    """获取基因的主要通路（最具体的分类）"""
+    pathways = get_pathways(row)
+    if not pathways:
+        return None
+    # 返回最具体的通路（不含"core"的优先，或返回第一个）
+    non_core = [p for p in pathways if 'core' not in p.lower()]
+    return non_core[0] if non_core else pathways[0]
+
+def get_broad_category(row):
+    """获取基因的大类通路"""
+    pathways = get_pathways(row)
+    if not pathways:
+        return None
+    # 提取大类（Autophagy, mTOR, PI3K-Akt, NF-kappa B, KSHV等）
+    categories = set()
+    for p in pathways:
+        if 'Autophagy' in p:
+            categories.add('Autophagy')
+        elif 'mTOR' in p:
+            categories.add('mTOR signaling')
+        elif 'PI3K-Akt' in p:
+            categories.add('PI3K-Akt signaling')
+        elif 'NF-kappa B' in p:
+            categories.add('NF-kappa B signaling')
+        elif 'KSHV' in p:
+            categories.add('KSHV infection')
+        elif 'Histone' in p:
+            categories.add('Histone modification')
+        elif 'Cell cycle' in p:
+            categories.add('Cell cycle')
+        else:
+            categories.add(p.split(' - ')[0])
+    return '; '.join(sorted(categories)) if categories else None
+
+# ===================== 3. 智能筛选（优先级分配，每侧≤12）=====================
+def get_labels_by_priority(df, cell_name, common_down=None, common_up=None, max_per_side=12):
+    """
+    按优先级分配标签，每侧不超过max_per_side个
+    优先级：core_genes → 通路代表 → 其他高显著性
+    如果基因池筛选后某侧为空，从所有显著基因中补充
+    只保留 log2FC [-6, 6] 和 -log10(padj) [0, 100] 范围内的数据
+    """
+    # 数据已在plot_volcano中过滤，直接使用
+    # 所有显著基因（不限于基因池）
+    all_sig_df = df[
+        (df['padj'] < p_threshold) & 
+        (df['log2FoldChange'].abs() >= log2fc_threshold)
+    ].copy()
+
+    # 基因池中的显著基因
+    pool_sig_df = all_sig_df[all_sig_df['Name'].isin([g.upper() for g in all_pool_genes])].copy()
+
+    # 分离上下调
+    all_up = all_sig_df[all_sig_df['log2FoldChange'] > 0].copy()
+    all_dn = all_sig_df[all_sig_df['log2FoldChange'] < 0].copy()
+    pool_up = pool_sig_df[pool_sig_df['log2FoldChange'] > 0].copy()
+    pool_dn = pool_sig_df[pool_sig_df['log2FoldChange'] < 0].copy()
+
+    print(f"   [{cell_name}] 基因池上调: {len(pool_up)} 个, 下调: {len(pool_dn)} 个")
+    print(f"   [{cell_name}] 所有显著上调: {len(all_up)} 个, 下调: {len(all_dn)} 个")
+
+    # 使用基因池优先，如果基因池为空则用所有显著基因
+    up_source = pool_up if len(pool_up) > 0 else all_up
+    dn_source = pool_dn if len(pool_dn) > 0 else all_dn
+
+    print(f"   [{cell_name}] 实际上调来源: {'基因池' if len(pool_up) > 0 else '所有显著基因'}")
+    print(f"   [{cell_name}] 实际下调来源: {'基因池' if len(pool_dn) > 0 else '所有显著基因'}")
+
+    # 使用所有显著基因添加通路等信息
+    all_sig_df['pathways'] = all_sig_df.apply(get_pathways, axis=1)
+    all_sig_df['is_core'] = all_sig_df['Name'].isin([g.upper() for g in core_genes])
+    all_sig_df['has_pathway'] = all_sig_df['pathways'].apply(lambda x: len(x) > 0)
+    all_sig_df['score'] = all_sig_df['log_p'] * all_sig_df['log2FoldChange'].abs()
+
+    # 同时给pool_sig_df也添加这些列
+    if len(pool_sig_df) > 0:
+        pool_sig_df['pathways'] = pool_sig_df.apply(get_pathways, axis=1)
+        pool_sig_df['is_core'] = pool_sig_df['Name'].isin([g.upper() for g in core_genes])
+        pool_sig_df['has_pathway'] = pool_sig_df['pathways'].apply(lambda x: len(x) > 0)
+        pool_sig_df['score'] = pool_sig_df['log_p'] * pool_sig_df['log2FoldChange'].abs()
+
+    # 重新分离上下调（确保有is_core等列）
+    all_up = all_sig_df[all_sig_df['log2FoldChange'] > 0].copy()
+    all_dn = all_sig_df[all_sig_df['log2FoldChange'] < 0].copy()
+    pool_up = pool_sig_df[pool_sig_df['log2FoldChange'] > 0].copy() if len(pool_sig_df) > 0 else pd.DataFrame()
+    pool_dn = pool_sig_df[pool_sig_df['log2FoldChange'] < 0].copy() if len(pool_sig_df) > 0 else pd.DataFrame()
+
+    # 使用基因池优先，如果基因池为空则用所有显著基因
+    up_source = pool_up if len(pool_up) > 0 else all_up
+    dn_source = pool_dn if len(pool_dn) > 0 else all_dn
+
+    up_sig = up_source.copy()
+    dn_sig = dn_source.copy()
+
+    def select_genes(subset, direction):
+        selected = []
+        reasons = {}
+
+        # 范围过滤：只保留 log2FC [-6, 6] 且 -log10(padj) [0, 100] 的基因
+        subset = subset[
+            (subset['log2FoldChange'] >= -6.0) & 
+            (subset['log2FoldChange'] <= 6.0) &
+            (subset['log_p'] >= 0) &
+            (subset['log_p'] <= 100.0)
+        ].copy()
+
+        if len(subset) == 0:
+            print(f"   ⚠️ {direction}侧范围内无显著基因")
+            return selected, reasons
+
+        # 步骤1：强制包含core基因
+        core_in_subset = subset[subset['is_core']].sort_values('score', ascending=False)
+        for _, row in core_in_subset.iterrows():
+            if len(selected) >= max_per_side:
+                break
+            gene = row['Name']
+            selected.append(gene)
+
+            # 细化core基因的标注原因
+            if gene == 'TNIP3':
+                reasons[gene] = 'Core gene: KSHV infection + NF-kB negative regulator (A20 family)'
+            elif gene == 'CADM2':
+                reasons[gene] = 'Core gene: Cell adhesion molecule, KSHV-related'
+            elif gene == 'DEPTOR':
+                pway = get_primary_pathway(row)
+                reasons[gene] = f'Core gene: mTOR inhibitor ({pway if pway else "mTOR pathway"})'
+            elif gene == 'RAP1GAP':
+                reasons[gene] = 'Core gene: RAP1 GTPase activating protein'
+            else:
+                pway = get_primary_pathway(row)
+                reasons[gene] = f'Core gene ({pway if pway else "user specified"})'
+
+        # 步骤2：选择通路代表（每个大类通路选一个，优先选有通路的）
+        covered_categories = set()
+        pathway_candidates = subset[
+            (~subset['Name'].isin(selected)) & 
+            (subset['has_pathway'])
+        ].sort_values('score', ascending=False)
+
+        for _, row in pathway_candidates.iterrows():
+            if len(selected) >= max_per_side:
+                break
+            gene = row['Name']
+            broad_cat = get_broad_category(row)
+            if broad_cat:
+                categories = set(broad_cat.split('; '))
+                new_cats = categories - covered_categories
+                if new_cats:
+                    selected.append(gene)
+                    primary = get_primary_pathway(row)
+                    broad = get_broad_category(row)
+                    reasons[gene] = f'Pathway representative: {primary} [{broad}]'
+                    covered_categories.update(categories)
+                elif not any(gene == s for s in selected):  # 如果大类已覆盖，但基因很显著，作为补充
+                    if row['score'] > subset['score'].quantile(0.9):  # 前10%显著性
+                        selected.append(gene)
+                        primary = get_primary_pathway(row)
+                        reasons[gene] = f'High significance + pathway: {primary}'
+            else:
+                selected.append(gene)
+                reasons[gene] = 'Pathway-related gene'
+
+        # 步骤3：补充其他高显著性基因
+        remaining = subset[~subset['Name'].isin(selected)].sort_values('score', ascending=False)
+        for _, row in remaining.iterrows():
+            if len(selected) >= max_per_side:
+                break
+            gene = row['Name']
+            selected.append(gene)
+
+            score_pct = (row['score'] / subset['score'].max()) * 100
+            if row['has_pathway']:
+                primary = get_primary_pathway(row)
+                broad = get_broad_category(row)
+                reasons[gene] = f'Top significance ({score_pct:.1f}% of max) + {primary} [{broad}]'
+            else:
+                # 尝试从基因名推断功能
+                desc = str(row.get('Description', '')).lower()
+                if any(k in desc for k in ['kinase', 'phosphatase']):
+                    reasons[gene] = f'Top significance ({score_pct:.1f}% of max): Enzyme/modifier'
+                elif any(k in desc for k in ['receptor', 'channel', 'transporter']):
+                    reasons[gene] = f'Top significance ({score_pct:.1f}% of max): Membrane protein'
+                elif any(k in desc for k in ['transcription', 'factor', 'zinc finger']):
+                    reasons[gene] = f'Top significance ({score_pct:.1f}% of max): Transcription regulator'
+                elif any(k in desc for k in ['ribosomal', 'translation', 'splicing']):
+                    reasons[gene] = f'Top significance ({score_pct:.1f}% of max): RNA/protein metabolism'
+                else:
+                    reasons[gene] = f'Top significance ({score_pct:.1f}% of max): {desc[:50] if desc else "Functional gene"}'
+
+        return selected, reasons
+
+    up_genes, up_reasons = select_genes(up_sig, 'Up')
+    dn_genes, dn_reasons = select_genes(dn_sig, 'Down')
+
+    # 如果某侧标签过少，从高显著性基因补充
+    min_labels_per_side = 6  # 每侧最少标签数
+
+    # 下调侧补充
+    if len(dn_genes) < min_labels_per_side:
+        # 先尝试从共下调基因补充
+        if len(dn_genes) == 0 and common_down:
+            common_dn_available = all_sig_df[
+                (all_sig_df['log2FoldChange'] < 0) & 
+                (all_sig_df['Name'].isin(common_down)) &
+                (~all_sig_df['Name'].isin(dn_genes))
+            ].sort_values('score', ascending=False).head(min_labels_per_side)
+
+            for _, row in common_dn_available.iterrows():
+                gene = row['Name']
+                dn_genes.append(gene)
+                score_pct = (row['score'] / all_sig_df[all_sig_df['log2FoldChange'] < 0]['score'].max()) * 100 if len(all_sig_df[all_sig_df['log2FoldChange'] < 0]) > 0 else 0
+                primary = get_primary_pathway(row)
+                broad = get_broad_category(row)
+                if primary:
+                    dn_reasons[gene] = f'Common down-regulated ({score_pct:.1f}% of max) + {primary} [{broad}]'
+                else:
+                    desc = str(row.get('Description', '')).lower()[:60]
+                    dn_reasons[gene] = f'Common down-regulated ({score_pct:.1f}% of max): {desc if desc else "No annotation"}'
+
+                label_records.append({
+                    'Cell': cell_name,
+                    'Gene': gene,
+                    'Log2FC': round(row['log2FoldChange'], 3),
+                    'padj': row['padj'],
+                    'log_p': round(row['log_p'], 2),
+                    'Direction': 'Down',
+                    'Pathways': '; '.join(get_pathways(row)) if get_pathways(row) else 'None',
+                    'Is_core': 'NO',
+                    'Selection_reason': dn_reasons[gene],
+                    'Score': round(row['score'], 2)
+                })
+            if len(common_dn_available) > 0:
+                print(f"   ↓ 从共下调基因补充了 {len(common_dn_available)} 个标签")
+
+        # 先尝试从共上调基因补充
+        if len(up_genes) == 0 and common_up:
+            common_up_available = all_sig_df[
+                (all_sig_df['log2FoldChange'] > 0) & 
+                (all_sig_df['Name'].isin(common_up)) &
+                (~all_sig_df['Name'].isin(up_genes))
+            ].sort_values('score', ascending=False).head(min_labels_per_side)
+
+            for _, row in common_up_available.iterrows():
+                gene = row['Name']
+                up_genes.append(gene)
+                score_pct = (row['score'] / all_sig_df[all_sig_df['log2FoldChange'] > 0]['score'].max()) * 100 if len(all_sig_df[all_sig_df['log2FoldChange'] > 0]) > 0 else 0
+                primary = get_primary_pathway(row)
+                broad = get_broad_category(row)
+                if primary:
+                    up_reasons[gene] = f'Common up-regulated ({score_pct:.1f}% of max) + {primary} [{broad}]'
+                else:
+                    desc = str(row.get('Description', '')).lower()[:60]
+                    up_reasons[gene] = f'Common up-regulated ({score_pct:.1f}% of max): {desc if desc else "No annotation"}'
+
+                label_records.append({
+                    'Cell': cell_name,
+                    'Gene': gene,
+                    'Log2FC': round(row['log2FoldChange'], 3),
+                    'padj': row['padj'],
+                    'log_p': round(row['log_p'], 2),
+                    'Direction': 'Up',
+                    'Pathways': '; '.join(get_pathways(row)) if get_pathways(row) else 'None',
+                    'Is_core': 'NO',
+                    'Selection_reason': up_reasons[gene],
+                    'Score': round(row['score'], 2)
+                })
+            if len(common_up_available) > 0:
+                print(f"   ↑ 从共上调基因补充了 {len(common_up_available)} 个标签")
+
+        if len(dn_genes) < min_labels_per_side:
+            # 下调侧补充高显著性基因
+            extra_dn = all_dn[
+                (~all_dn['Name'].isin([g.upper() for g in dn_genes]))
+            ].sort_values('score', ascending=False).head(min_labels_per_side - len(dn_genes))
+
+            for _, row in extra_dn.iterrows():
+                gene = row['Name']
+                if gene not in dn_genes:
+                    dn_genes.append(gene)
+                    primary = get_primary_pathway(row)
+                    broad = get_broad_category(row)
+                    score_pct = (row['score'] / all_sig_df[all_sig_df['log2FoldChange'] < 0]['score'].max()) * 100 if len(all_sig_df[all_sig_df['log2FoldChange'] < 0]) > 0 else 0
+
+                if primary:
+                    dn_reasons[gene] = f'Auto-filled: Top down-regulated ({score_pct:.1f}% of max) + {primary} [{broad}]'
+                else:
+                    desc = str(row.get('Description', '')).lower()[:60]
+                    dn_reasons[gene] = f'Auto-filled: Top down-regulated ({score_pct:.1f}% of max): {desc if desc else "No pathway annotation"}'
+
+                # 记录到label_records
+                label_records.append({
+                    'Cell': cell_name,
+                    'Gene': gene,
+                    'Log2FC': round(row['log2FoldChange'], 3),
+                    'padj': row['padj'],
+                    'log_p': round(row['log_p'], 2),
+                    'Direction': 'Down',
+                    'Pathways': '; '.join(get_pathways(row)) if get_pathways(row) else 'None',
+                    'Is_core': 'NO',
+                    'Selection_reason': dn_reasons[gene],
+                    'Score': round(row['score'], 2)
+                })
+        print(f"   ↓ 下调侧自动补充 {len(extra_dn)} 个高显著性基因")
+
+    if len(up_genes) < min_labels_per_side:
+        # 上调侧补充高显著性基因
+        extra_up = all_up[
+            (~all_up['Name'].isin([g.upper() for g in up_genes]))
+        ].sort_values('score', ascending=False).head(min_labels_per_side - len(up_genes))
+
+        for _, row in extra_up.iterrows():
+            gene = row['Name']
+            if gene not in up_genes:
+                up_genes.append(gene)
+                primary = get_primary_pathway(row)
+                broad = get_broad_category(row)
+                score_pct = (row['score'] / all_sig_df[all_sig_df['log2FoldChange'] > 0]['score'].max()) * 100 if len(all_sig_df[all_sig_df['log2FoldChange'] > 0]) > 0 else 0
+
+                if primary:
+                    up_reasons[gene] = f'Auto-filled: Top up-regulated ({score_pct:.1f}% of max) + {primary} [{broad}]'
+                else:
+                    desc = str(row.get('Description', '')).lower()[:60]
+                    up_reasons[gene] = f'Auto-filled: Top up-regulated ({score_pct:.1f}% of max): {desc if desc else "No pathway annotation"}'
+
+                # 记录到label_records
+                label_records.append({
+                    'Cell': cell_name,
+                    'Gene': gene,
+                    'Log2FC': round(row['log2FoldChange'], 3),
+                    'padj': row['padj'],
+                    'log_p': round(row['log_p'], 2),
+                    'Direction': 'Up',
+                    'Pathways': '; '.join(get_pathways(row)) if get_pathways(row) else 'None',
+                    'Is_core': 'NO',
+                    'Selection_reason': up_reasons[gene],
+                    'Score': round(row['score'], 2)
+                })
+        print(f"   ↑ 上调侧自动补充 {len(extra_up)} 个高显著性基因")
+
+    all_reasons = {**up_reasons, **dn_reasons}
+
+    # 记录到Excel
+    for _, row in all_sig_df.iterrows():
+        gene = row['Name']
+        if gene in up_genes or gene in dn_genes:
+            label_records.append({
+                'Cell': cell_name,
+                'Gene': gene,
+                'Log2FC': round(row['log2FoldChange'], 3),
+                'padj': row['padj'],
+                'log_p': round(row['log_p'], 2),
+                'Direction': 'Up' if row['log2FoldChange'] > 0 else 'Down',
+                'Pathways': '; '.join(row['pathways']) if row['pathways'] else 'None',
+                'Is_core': 'YES' if row['is_core'] else 'NO',
+                'Selection_reason': all_reasons.get(gene, 'Unknown'),
+                'Score': round(row['score'], 2)
+            })
+
+    return up_genes, dn_genes
+
+# ===================== 4. 绘图函数 =====================
+def plot_volcano(cell_name, file_path, common_down=None, common_up=None):
+    print(f"\n⏳ 正在读取并清洗数据: {os.path.basename(file_path)} ...")
+
+    if file_path.endswith(('.xls', '.xlsx')):
+        df_raw = pd.read_excel(file_path)
+    else:
+        df_raw = pd.read_csv(file_path)
+
+    df = clean_data(df_raw)
+
+    if df.empty:
+        print(f"⚠️ 警告：清洗后 [{cell_name}] 数据为空，无法绘图。")
+        return
+
+    up_m = (df['padj'] < p_threshold) & (df['log2FoldChange'] >= log2fc_threshold)
+    dn_m = (df['padj'] < p_threshold) & (df['log2FoldChange'] <= -log2fc_threshold)
+    ns_m = ~(up_m | dn_m)
+
+    fig, ax = plt.subplots(figsize=(8.5, 12.5), dpi=300)
+
+    ax.scatter(df.loc[ns_m, 'log2FoldChange'], df.loc[ns_m, 'log_p'], 
+               c=color_ns, alpha=0.15, s=12, edgecolors='none')
+    ax.scatter(df.loc[dn_m, 'log2FoldChange'], df.loc[dn_m, 'log_p'], 
+               c=color_down, alpha=0.45, s=26, edgecolors='none')
+    ax.scatter(df.loc[up_m, 'log2FoldChange'], df.loc[up_m, 'log_p'], 
+               c=color_up, alpha=0.45, s=26, edgecolors='none')
+
+    ax.axhline(-np.log10(p_threshold), color='#7F8C8D', linestyle=':', linewidth=1.2, alpha=0.5)
+    ax.axvline(log2fc_threshold, color='#7F8C8D', linestyle=':', linewidth=1.2, alpha=0.5)
+    ax.axvline(-log2fc_threshold, color='#7F8C8D', linestyle=':', linewidth=1.2, alpha=0.5)
+
+    # 坐标轴范围根据画面协调度调整（数据已过滤，但坐标轴可以稍宽以美观）
+    x_min = max(-7.0, float(df['log2FoldChange'].min()) - 0.5)
+    x_max = min(7.0, float(df['log2FoldChange'].max()) + 0.5)
+    y_max = min(110.0, float(df['log_p'].max()) * 1.05)
+
+    if not np.isfinite(x_min): x_min = -6.5
+    if not np.isfinite(x_max): x_max = 6.5
+    if not np.isfinite(y_max): y_max = 100.0
+
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(-4, y_max)
+
+    ax.text(log2fc_threshold, -2.8, '1.0', color='#B2182B', weight='bold', fontsize=11, ha='center',
+            bbox=dict(boxstyle='square,pad=0.15', fc='#FDEDEC', ec='#B2182B', lw=1, alpha=0.9))
+    ax.text(-log2fc_threshold, -2.8, '-1.0', color='#2166AC', weight='bold', fontsize=11, ha='center',
+            bbox=dict(boxstyle='square,pad=0.15', fc='#EBF5FB', ec='#2166AC', lw=1, alpha=0.9))
+    ax.text(x_min + 0.5, -np.log10(p_threshold) + 0.8, 
+            f'padj = {p_threshold}', fontsize=10, color='#555555', style='italic')
+
+    up_l, dn_l = get_labels_by_priority(df, cell_name, common_down, common_up, max_per_side=12)
+    texts = []
+
+    # 统一白色标签（除TNIP3外）
+    for g in dn_l + up_l:
+        if g == 'TNIP3':
+            continue
+        rows = df[df['Name'] == g]
+        if rows.empty: 
+            continue
+        row = rows.iloc[0]
+
+        texts.append(ax.text(
+            row['log2FoldChange'], row['log_p'], g,
+            fontsize=12, color='#111111', weight='normal',
+            bbox=dict(boxstyle='round,pad=0.25', fc='#FFFFFF', ec='#BDC3C7', lw=1, alpha=0.55)
+        ))
+
+    if texts:
+        print(f"⏳ 正在计算 [{cell_name}] 的防碰撞错落排版...")
+        adjust_text(texts, 
+                    arrowprops=dict(arrowstyle="-", color='#BDC3C7', lw=0.6, alpha=0.7),
+                    expand_points=(1.6, 1.9), expand_text=(1.5, 1.8),
+                    force_points=(0.3, 0.5), force_text=(0.4, 0.7),
+                    only_move={'points':'y', 'text':'xy'}, max_iterations=3000)
+
+    # TNIP3 专属高亮
+    tnip3_rows = df[df['Name'] == 'TNIP3']
+    if not tnip3_rows.empty:
+        t_row = tnip3_rows.iloc[0]
+        offset_x = 2.2 if t_row['log2FoldChange'] >= 0 else -2.2
+        ax.annotate('TNIP3', 
+                    xy=(t_row['log2FoldChange'], t_row['log_p']), 
+                    xytext=(t_row['log2FoldChange'] + offset_x, t_row['log_p'] + (y_max * 0.12)),
+                    fontsize=14, weight='bold', color='#FFFFFF', ha='center',
+                    bbox=dict(boxstyle='round,pad=0.4', fc='#D32F2F', ec='#8B0000', lw=1.6, alpha=0.95),
+                    arrowprops=dict(arrowstyle="->", color='#D32F2F', lw=2.5, 
+                                    connectionstyle="arc3,rad=-0.15", mutation_scale=20))
+        print(f"🎯 TNIP3 已独立高亮标注")
+
+    ax.set_xlabel('Log$_2$ (Fold Change)', fontsize=14, weight='bold', labelpad=10)
+    ax.set_ylabel('-Log$_{10}$ (Adjusted P-value)', fontsize=14, weight='bold', labelpad=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=color_up, markersize=11, 
+               label=f'Up regulated ({np.sum(up_m)})'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=color_down, markersize=11, 
+               label=f'Down regulated ({np.sum(dn_m)})')
+    ]
+    ax.legend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, -0.08), 
+              ncol=2, frameon=True, facecolor='#FAFAFA', edgecolor='#E0E0E0', 
+              prop={'size':12, 'weight':'bold'})
+
+    plt.tight_layout()
+    out_img = os.path.join(data_dir, f"Volcano_{cell_name}_Priority.png")
+    fig.savefig(out_img, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"🎉 成功输出火山图: {os.path.basename(out_img)}")
+
+# ===================== 5. 主运行逻辑 =====================
+if __name__ == "__main__":
+    cell_lines = {
+        "BCBL-1": "BLCON_vs_BLT",
+        "iSLK-BAC16": "IB6"
+    }
+
+    all_files = os.listdir(data_dir)
+
+    # 第一步：读取所有细胞系数据，计算共下调/共上调
+    print("=" * 60)
+    print("🔍 正在读取数据并计算共下调/共上调基因...")
+    print("=" * 60)
+
+    cell_data = {}
+    for cell_name, keyword in cell_lines.items():
+        matched_file = next((f for f in all_files if keyword in f and f.endswith(('.xls', '.xlsx', '.csv'))), None)
+        if matched_file:
+            full_path = os.path.join(data_dir, matched_file)
+            if full_path.endswith(('.xls', '.xlsx')):
+                df_raw = pd.read_excel(full_path)
+            else:
+                df_raw = pd.read_csv(full_path)
+            df = clean_data(df_raw)
+            cell_data[cell_name] = df
+            print(f"✅ [{cell_name}] 读取完成: {len(df)} 个基因")
+
+    # 计算共下调和共上调
+    global common_down, common_up
+    common_down = set()
+    common_up = set()
+
+    if len(cell_data) >= 2:
+        common_down = find_common_regulated_genes(cell_data, 'down')
+        common_up = find_common_regulated_genes(cell_data, 'up')
+        print(f"\n📊 共下调基因: {len(common_down)} 个")
+        if len(common_down) > 0:
+            print(f"   示例: {', '.join(sorted(list(common_down))[:10])}")
+        print(f"📊 共上调基因: {len(common_up)} 个")
+        if len(common_up) > 0:
+            print(f"   示例: {', '.join(sorted(list(common_up))[:10])}")
+
+    print("\n" + "=" * 60)
+    print("🎨 开始绘制火山图...")
+    print("=" * 60)
+
+    executed_count = 0
+    for cell_name, keyword in cell_lines.items():
+        matched_file = next((f for f in all_files if keyword in f and f.endswith(('.xls', '.xlsx', '.csv'))), None)
+
+        if matched_file:
+            full_path = os.path.join(data_dir, matched_file)
+            plot_volcano(cell_name, full_path, common_down, common_up)
+            executed_count += 1
+        else:
+            print(f"⚠️ 提示：在目录中未找到包含 '{keyword}' 的数据文件，跳过该细胞系。")
+
+    if label_records:
+        df_out = pd.DataFrame(label_records)
+
+        # ===== Sheet1: 详细记录（按优先级排序）=====
+        reason_order = {
+            'Core gene (must show)': 0,
+            'Pathway rep (Autophagy)': 1,
+            'Pathway rep (mTOR)': 2,
+            'Pathway rep (PI3K-Akt)': 3,
+            'Pathway rep (NF-kappa B)': 4,
+            'Pathway rep (KSHV)': 5,
+            'High sig + pathway': 6,
+            'High significance (score-ranked)': 7
+        }
+        df_out['sort_key'] = df_out['Selection_reason'].map(lambda x: next((v for k,v in reason_order.items() if k in x), 99))
+        df_out = df_out.sort_values(['Cell', 'sort_key', 'Score'], ascending=[True, True, False])
+        df_out = df_out.drop('sort_key', axis=1)
+
+        # ===== Sheet2: 整理好的标签列表（按细胞系分上下调）=====
+        summary_data = []
+        for cell in df_out['Cell'].unique():
+            cell_df = df_out[df_out['Cell'] == cell]
+            up_genes = cell_df[cell_df['Direction'] == 'Up']['Gene'].tolist()
+            dn_genes = cell_df[cell_df['Direction'] == 'Down']['Gene'].tolist()
+
+            # 对齐上下调列表长度
+            max_len = max(len(up_genes), len(dn_genes))
+            up_genes += [''] * (max_len - len(up_genes))
+            dn_genes += [''] * (max_len - len(dn_genes))
+
+            for i in range(max_len):
+                summary_data.append({
+                    'Cell': cell if i == 0 else '',
+                    'Up_regulated_labels': up_genes[i],
+                    'Down_regulated_labels': dn_genes[i]
+                })
+
+        df_summary = pd.DataFrame(summary_data)
+
+        # ===== 输出多Sheet Excel =====
+        out_excel = os.path.join(data_dir, "Priority_Genes_Summary.xlsx")
+        with pd.ExcelWriter(out_excel, engine='openpyxl') as writer:
+            df_out.to_excel(writer, sheet_name='Detailed_Records', index=False)
+            df_summary.to_excel(writer, sheet_name='Label_List', index=False)
+
+        print(f"\n📊 优先级基因汇总表已保存：{os.path.basename(out_excel)}")
+        print(f"   - Sheet1: Detailed_Records（详细记录）")
+        print(f"   - Sheet2: Label_List（整理好的标签列表）")
+
+    if executed_count == 0:
+        print("❌ 错误：工作目录中未匹配到任何指定细胞系的数据，请检查输入文件名！")
+    else:
+        print(f"\n✨ 全部任务顺利完成！成功绘制了 {executed_count} 组火山图。")
