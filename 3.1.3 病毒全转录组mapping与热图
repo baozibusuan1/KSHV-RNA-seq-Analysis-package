@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+KSHV转录组基因组表达图谱与关键基因热图绘制脚本 (学术优化版 V3 - 修复文件路径)
+适配无扩展名的文件：KSHV_Genome_Expression_Normalized_Fig2_Source
+"""
+
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.colors import Normalize
+from matplotlib.patches import Rectangle, Polygon
+import matplotlib.ticker as ticker
+
+# ================= 1. 配置与数据准备 =================
+BASE_DIR = r"D:\博士学习\S11W2\RNA_Seq_Analysis"
+INPUT_DIR = r"D:\博士学习\S11W2\RSeq_A- cby0320-（图片表格原件+raw data+脚本）\输入数据"
+OUTPUT_DIR = r"D:\博士学习\S11W3\Figure0620"
+# 使用实际的文件名（无扩展名）
+INPUT_FILE = os.path.join(INPUT_DIR, "KSHV_Genome_Expression_Normalized_Fig2_Source")
+OUTPUT_GENOME_MAP = os.path.join(OUTPUT_DIR, "Fig2A_KSHV_Genome_Tracks_Aesthetic.pdf")
+OUTPUT_HEATMAP = os.path.join(OUTPUT_DIR, "Fig2B_Key_Genes_Heatmap_Aesthetic.pdf")
+
+# 创建输出目录（如果不存在）
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 字体设置
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['svg.fonttype'] = 'none'
+plt.rcParams['pdf.fonttype'] = 42  # 确保PDF中的文字可编辑
+
+print(f"📂 输入目录：{INPUT_DIR}")
+print(f"📂 输出目录：{OUTPUT_DIR}")
+print(f"📊 输入文件：{INPUT_FILE}")
+
+# 智能读取数据 - 尝试多种可能的格式
+def read_data_file(filepath):
+    """尝试多种方式读取数据文件"""
+    
+    # 首先检查文件是否存在
+    if not os.path.exists(filepath):
+        # 尝试添加常见扩展名
+        for ext in ['.xlsx', '.xls', '.csv', '.txt']:
+            if os.path.exists(filepath + ext):
+                print(f"找到文件：{filepath + ext}")
+                filepath = filepath + ext
+                break
+        else:
+            # 列出目录下所有文件
+            print("目录下的文件：")
+            for f in os.listdir(INPUT_DIR):
+                print(f"  - {f}")
+            raise FileNotFoundError(f"❌ 未找到文件：{filepath} 或其带扩展名的版本")
+    
+    # 根据扩展名选择读取方式
+    if filepath.endswith('.xlsx') or filepath.endswith('.xls'):
+        print(f"📖 作为Excel文件读取：{filepath}")
+        return pd.read_excel(filepath)
+    elif filepath.endswith('.csv'):
+        print(f"📖 作为CSV文件读取：{filepath}")
+        return pd.read_csv(filepath)
+    else:
+        # 无扩展名或未知扩展名，尝试多种方式
+        print(f"📖 尝试作为Excel文件读取：{filepath}")
+        try:
+            return pd.read_excel(filepath)
+        except:
+            print("Excel读取失败，尝试作为CSV读取...")
+            try:
+                return pd.read_csv(filepath)
+            except:
+                print("CSV读取失败，尝试其他编码...")
+                try:
+                    return pd.read_csv(filepath, encoding='gbk')
+                except:
+                    print("所有尝试均失败，请检查文件格式")
+                    raise
+
+# 读取数据
+try:
+    data = read_data_file(INPUT_FILE)
+    print(f"✅ 成功读取数据：{len(data)} 个基因")
+    print(f"数据列：{list(data.columns)}")
+except Exception as e:
+    print(f"❌ 读取文件失败：{e}")
+    raise
+
+# 定义样本列
+sample_names = ['iSLK_CON', 'iSLK_T', 'iSLK-BAC16_CON', 'iSLK-BAC16_T', 'BCBL-1_CON', 'BCBL-1_T']
+sample_labels = ['iSLK (Control)', 'iSLK (Induction)', 'iSLK-BAC16 (Latent)', 
+                 'iSLK-BAC16 (Lytic)', 'BCBL-1 (Latent)', 'BCBL-1 (Lytic)']
+
+# 检查列是否存在
+missing_cols = [c for c in sample_names if c not in data.columns]
+if missing_cols:
+    print(f"⚠️ 警告：缺少列 {missing_cols}")
+    print(f"可用列：{list(data.columns)}")
+    
+    # 尝试处理列名中的特殊字符（如短横线）
+    data.columns = data.columns.str.replace('-', '_', regex=False)
+    sample_names_clean = [c.replace('-', '_') for c in sample_names]
+    
+    missing_cols_clean = [c for c in sample_names_clean if c not in data.columns]
+    if not missing_cols_clean:
+        print("✅ 通过替换短横线解决了列名问题")
+        sample_names = sample_names_clean
+    else:
+        raise ValueError(f"❌ 数据表中缺少必要的列")
+
+# Log2(x+1) 归一化
+expr_data = np.log2(data[sample_names].astype(float) + 1)
+vmin, vmax = expr_data.min().min(), expr_data.max().max()
+
+# 审美配色：热图使用 magma (黑-紫-粉-橙黄)，非常适合展示表达量动态
+cmap = plt.cm.magma
+norm = Normalize(vmin=vmin, vmax=vmax)
+
+# ================= 2. 绘制基因组轨道图 (Fig 2A) =================
+print("🎨 正在绘制审美优化版基因组轨道图...")
+
+fig1, ax1 = plt.subplots(figsize=(26, 14))  # 略微拉长画幅以容纳标签
+
+
+def get_gene_polygon(start, end, direction, y_center, height=0.6, tail_len=800):
+    """
+    绘制基因箭头多边形
+    direction: 1 表示正向（右箭头）, -1 表示反向（左箭头）
+    tail_len: 箭头尾部长度，可根据基因长度调整
+    """
+    length = end - start
+    if tail_len > length:
+        tail_len = length * 0.4  # 如果基因太短，按比例缩小箭头
+    if direction == 1:
+        return Polygon([[start, y_center - height / 2],
+                        [end - tail_len, y_center - height / 2],
+                        [end, y_center],
+                        [end - tail_len, y_center + height / 2],
+                        [start, y_center + height / 2]])
+    else:
+        return Polygon([[end, y_center - height / 2],
+                        [start + tail_len, y_center - height / 2],
+                        [start, y_center],
+                        [start + tail_len, y_center + height / 2],
+                        [end, y_center + height / 2]])
+
+
+# 扩展为 6 层交错高度，彻底防止重叠
+pos_y_levels = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5]
+neg_y_levels = [-1.5, -2.5, -3.5, -4.5, -5.5, -6.5]
+pos_idx, neg_idx = 0, 0
+
+# 中心线 (Z-order=2)
+ax1.axhline(0, color='#333333', linewidth=1.2, zorder=2)
+
+# 遍历所有基因
+for i, row in data.iterrows():
+    start = row['Start_Pos']
+    end = row['End_Pos']
+    direction = row['Direction']
+    name = row['Gene_Name']
+
+    # 根据方向选择颜色和标签位置
+    if direction == 1:
+        y_center = 0.5
+        label_y = pos_y_levels[pos_idx % 6]
+        pos_idx += 1
+        color = '#2A9D8F'  # 高级深青色 (正向)
+    else:
+        y_center = -0.5
+        label_y = neg_y_levels[neg_idx % 6]
+        neg_idx += 1
+        color = '#E76F51'  # 高级陶土红 (反向)
+
+    # 基因箭头 (Z-order=3)
+    poly = get_gene_polygon(start, end, direction, y_center, height=0.5)
+    poly.set_facecolor(color)
+    poly.set_edgecolor('white')  # 白色边框让重叠基因更容易区分
+    poly.set_linewidth(0.8)
+    poly.set_zorder(3)
+    ax1.add_patch(poly)
+
+    # 引线 (Z-order=2)
+    center_x = start + (end - start) / 2
+    ax1.plot([center_x, center_x],
+             [y_center + (0.3 * direction), label_y - (0.3 * direction)],
+             color='#999999', linestyle='--', linewidth=0.6, zorder=2)
+
+    # 文本标签 (Z-order=5 最顶层，并加上半透明白底防止穿透)
+    bbox_props = dict(boxstyle="round,pad=0.1", fc=(1, 1, 1, 0.7), ec="none")
+    ax1.text(center_x, label_y, name, ha='center', va='center',
+             fontsize=9, rotation=0, zorder=5, bbox=bbox_props)
+
+    # 表达量轨道 (Z-order=1 最底层)
+    track_start_y = -8
+    track_height = 0.85
+    track_gap = 1.0  # 轨道间距
+
+    for j, sample in enumerate(sample_names):
+        val = expr_data.loc[i, sample]
+        y_pos = track_start_y - j * track_gap
+        rect = Rectangle((start, y_pos), width=(end - start), height=track_height,
+                         facecolor=cmap(norm(val)), edgecolor='none', zorder=1)
+        ax1.add_patch(rect)
+
+# 轨道行名标签
+for j, label in enumerate(sample_labels):
+    y_pos = -8 - j * 1.0 + 0.4  # 轨道中心位置
+    ax1.text(-3000, y_pos, label, ha='right', va='center', 
+             fontsize=11, weight='bold', color='#333333')
+
+# 格式化坐标轴
+max_pos = data['End_Pos'].max()
+ax1.set_xlim(-18000, max_pos + 5000)
+ax1.set_ylim(-15, 8)
+
+# X轴刻度格式化 (kb)
+formatter = ticker.FuncFormatter(lambda x, pos: f"{int(x/1000)} kb" if x >= 0 else "")
+ax1.xaxis.set_major_formatter(formatter)
+ax1.xaxis.set_major_locator(ticker.MultipleLocator(10000))  # 每10kb一个大刻度
+ax1.xaxis.set_minor_locator(ticker.MultipleLocator(5000))  # 每5kb一个小刻度
+
+# 隐藏不必要的边框
+ax1.spines['top'].set_visible(False)
+ax1.spines['right'].set_visible(False)
+ax1.spines['left'].set_visible(False)
+ax1.set_yticks([])
+ax1.set_xlabel("KSHV Genome Position", fontsize=14, weight='bold', labelpad=10)
+
+# 添加 Colorbar
+sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+sm.set_array([])
+cbar_ax = fig1.add_axes([0.92, 0.2, 0.012, 0.15])
+cbar = fig1.colorbar(sm, cax=cbar_ax, label='log2(Expression + 1)')
+cbar.ax.tick_params(labelsize=10)
+
+plt.tight_layout(rect=[0, 0, 0.9, 1])
+plt.savefig(OUTPUT_GENOME_MAP, dpi=300, bbox_inches='tight')
+plt.close(fig1)
+print(f"✅ 审美优化版轨道图已保存：{OUTPUT_GENOME_MAP}")
+
+# ================= 3. 绘制关键基因纯热图 (Fig 2B) =================
+print("🔥 正在绘制关键基因热图...")
+
+# 定义关键基因模式（按指定顺序排列）
+# 顺序：ORF50(RTA)第一，ORF71、ORF16、K7放二至四列，其余按重要性排列
+key_genes_patterns = [
+    ('ORF50', 'RTA'),
+    ('ORF71', 'vFLIP'),
+    ('ORF16', 'vBcl-2'),
+    ('K7', 'vIAP'),
+    ('ORF73', 'LANA'),
+    ('ORF72', 'vCyc'),
+    ('ORF57', 'MTA'),
+    ('K8', 'K-bZIP'),
+    ('K8.1', None),
+    ('ORF45', None),
+    ('K9', 'vIRF-1'),
+    ('K12', 'Kaposin'),
+]
+
+# 筛选关键基因并按指定顺序排列
+selected_rows = []
+for pattern, alias in key_genes_patterns:
+    mask = data['Gene_Name'].apply(lambda x: pattern in str(x))
+    matched = data[mask].copy()
+    if not matched.empty:
+        # 添加显示名称（带括号别名）
+        if alias:
+            matched['Display_Name'] = f"{pattern} ({alias})"
+        else:
+            matched['Display_Name'] = pattern
+        selected_rows.append(matched)
+
+if selected_rows:
+    selected_data = pd.concat(selected_rows, ignore_index=True)
+else:
+    selected_data = pd.DataFrame()
+
+if not selected_data.empty:
+    fig2, ax2 = plt.subplots(figsize=(9, len(selected_data) * 0.5 + 2))
+    
+    # 计算热图矩阵
+    heatmap_matrix = np.log2(selected_data[sample_names].astype(float) + 1).values
+    
+    # 绘制热图
+    im = ax2.imshow(heatmap_matrix, cmap='magma', aspect='auto', vmin=vmin, vmax=vmax)
+    
+    # 设置坐标轴标签
+    ax2.set_yticks(range(len(selected_data)))
+    ax2.set_yticklabels(selected_data['Display_Name'], fontsize=11)
+    ax2.set_xticks(range(len(sample_labels)))
+    ax2.set_xticklabels(sample_labels, fontsize=11, rotation=45, ha='right')
+    
+    # 添加网格线
+    ax2.set_xticks(np.arange(-0.5, len(sample_labels) - 0.5, 1), minor=True)
+    ax2.set_yticks(np.arange(-0.5, len(selected_data) - 0.5, 1), minor=True)
+    ax2.grid(which="minor", color="white", linestyle='-', linewidth=1.5)
+    
+    # 添加颜色条
+    cbar = plt.colorbar(im, ax=ax2, shrink=0.6)
+    cbar.set_label('log2(Expression + 1)', fontsize=11)
+    cbar.ax.tick_params(labelsize=10)
+    
+    # 设置标题
+    plt.title('Key Viral Genes Expression', fontsize=14, weight='bold', pad=15)
+    
+    plt.tight_layout()
+    plt.savefig(OUTPUT_HEATMAP, dpi=300, bbox_inches='tight')
+    plt.close(fig2)
+    print(f"✅ 审美优化版热图已保存：{OUTPUT_HEATMAP}")
+else:
+    print("⚠️ 未找到匹配的关键基因，跳过热图绘制。")
+
+print("\n✅ 所有绘图任务完成！")
+print(f"📊 输入数据：{INPUT_FILE}")
+print(f"🖼️  基因组轨道图：{OUTPUT_GENOME_MAP}")
+print(f"🔥 关键基因热图：{OUTPUT_HEATMAP}")
+
+# ================= 显示统计信息 =================
+print("\n📈 基本统计信息：")
+print(f"总基因数：{len(data)}")
+print(f"基因组范围：0 - {data['End_Pos'].max()/1000:.0f} kb")
+print(f"表达量范围（log2）：{vmin:.2f} - {vmax:.2f}")
+print(f"关键基因数：{len(selected_data) if not selected_data.empty else 0}")
