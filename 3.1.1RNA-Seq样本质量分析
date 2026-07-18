@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+KSHV转录组分析 - 四图生成脚本
+图1: 人样本PCA | 图2: 病毒样本PCA | 图3: 人样本相关性热图 | 图4: 病毒Top高变异聚类热图
+配色: 莫兰迪高级色系，图面整洁，完全符合顶级博士毕业论文标准
+"""
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.colors import LinearSegmentedColormap
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# ================= 1. 全局配置 =================
+INPUT_DIR = r"D:\博士学习\S11W2\RSeq_A- cby0320-（图片表格原件+raw data+脚本）\输入数据"
+OUTPUT_DIR = r"D:\博士学习\S11W3\Figure0620"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['svg.fonttype'] = 'none'
+plt.rcParams['pdf.fonttype'] = 42
+
+# 标签映射（统一命名，图例展示全称）
+LABEL_MAP = {
+    'IKCON':  'iSLK (Control)',
+    'IKT':    'iSLK (Induction)',
+    'IB6CON': 'iSLK-BAC16 (Latent)',
+    'IB6T':   'iSLK-BAC16 (Lytic)',
+    'BLCON':  'BCBL-1 (Latent)',
+    'BLT':    'BCBL-1 (Lytic)'
+}
+
+# 莫兰迪高级配色
+C_TEAL = '#2A9D8F'
+C_TERRA = '#E76F51'
+C_DARKPURP = '#264653'
+C_MAGENTA = '#B63679'
+C_YELLOW = '#E9C46A'
+C_GRAYBLUE = '#457B9D'
+
+GROUP_COLORS = {
+    'iSLK (Control)': C_TEAL,
+    'iSLK (Induction)': C_TERRA,
+    'iSLK-BAC16 (Latent)': C_DARKPURP,
+    'iSLK-BAC16 (Lytic)': C_MAGENTA,
+    'BCBL-1 (Latent)': C_GRAYBLUE,
+    'BCBL-1 (Lytic)': C_YELLOW
+}
+
+# 热图配色: 绿-黑-红
+CMAP_HEATMAP = LinearSegmentedColormap.from_list(
+    "green_black_red", ['#27AE60', '#000000', '#E74C3C']
+)
+
+SAMPLE_ORDER = ['IKCON', 'IKT', 'IB6CON', 'IB6T', 'BLCON', 'BLT']
+LABEL_ORDER = [LABEL_MAP[k] for k in SAMPLE_ORDER]
+
+# ================= 2. 数据读取 =================
+def read_pca_data(filepath):
+    """读取PCA数据"""
+    try:
+        df = pd.read_excel(filepath)
+    except Exception:
+        df = pd.read_csv(filepath)
+    df.columns = df.columns.str.strip()
+    if 'condition' not in df.columns:
+        for col in df.columns:
+            if 'cond' in col.lower() or 'group' in col.lower():
+                df.rename(columns={col: 'condition'}, inplace=True)
+                break
+    df['condition_label'] = df['condition'].map(LABEL_MAP)
+    return df
+
+def read_expression_data(filepath):
+    """读取表达量矩阵"""
+    try:
+        df = pd.read_excel(filepath)
+    except Exception:
+        df = pd.read_csv(filepath)
+    df.columns = df.columns.str.strip()
+    if 'Name' in df.columns:
+        df.rename(columns={'Name': 'Gene_Name'}, inplace=True)
+    if 'Gene' in df.columns:
+        df.rename(columns={'Gene': 'Gene_Name'}, inplace=True)
+    df = df[~df['Gene_Name'].isin(['-', 'nan', 'NaN', '', None])]
+    df['Gene_Name'] = df['Gene_Name'].astype(str).str.strip()
+    return df
+
+def extract_fpkm_columns(df):
+    """提取表达量列"""
+    fpkm_cols = [c for c in df.columns if 'fpkm' in c.lower()]
+    if not fpkm_cols:
+        for pattern in ['count', 'Count', 'expr', 'Expr', 'value', 'Value', 'tpm', 'TPM']:
+            fpkm_cols = [c for c in df.columns if pattern in c]
+            if fpkm_cols:
+                break
+    return fpkm_cols
+
+def standardize_columns(expr_matrix, fpkm_cols):
+    """标准化列为统一标签"""
+    col_map = {}
+    for col in fpkm_cols:
+        for key in SAMPLE_ORDER:
+            if key in col:
+                col_map[col] = LABEL_MAP[key]
+                break
+    expr_matrix.rename(columns=col_map, inplace=True)
+    available_cols = [c for c in LABEL_ORDER if c in expr_matrix.columns]
+    return expr_matrix[available_cols]
+
+# ================= 3. 图1: 人样本PCA =================
+def plot_human_pca():
+    print("📈 绘制人样本PCA...")
+    pca_df = read_pca_data(os.path.join(INPUT_DIR, "PCA人.xlsx"))
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    for label in LABEL_ORDER:
+        subset = pca_df[pca_df['condition_label'] == label]
+        if not subset.empty:
+            ax.scatter(subset['PC1'], subset['PC2'], c=GROUP_COLORS[label],
+                      label=label, s=180, alpha=0.9, edgecolor='white', linewidth=1.5)
+
+    ax.set_title("PCA of Human Transcriptome Profiles", fontsize=14, fontweight='bold', pad=15)
+    ax.set_xlabel("PC1", fontsize=12, fontweight='bold')
+    ax.set_ylabel("PC2", fontsize=12, fontweight='bold')
+
+    handles = [plt.Line2D([0], [0], marker='o', color='w',
+                           markerfacecolor=GROUP_COLORS[l], markersize=10, label=l)
+               for l in LABEL_ORDER if l in pca_df['condition_label'].values]
+    ax.legend(handles=handles, loc='center left', bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9.5)
+    
+    sns.despine()
+    plt.savefig(os.path.join(OUTPUT_DIR, "Fig3A_Human_PCA.pdf"), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("   ✅ 已保存")
+
+# ================= 4. 图2: 病毒样本PCA =================
+def plot_virus_pca():
+    print("📈 绘制病毒样本PCA...")
+    pca_df = read_pca_data(os.path.join(INPUT_DIR, "PCA病毒.xlsx"))
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    for label in LABEL_ORDER:
+        subset = pca_df[pca_df['condition_label'] == label]
+        if not subset.empty:
+            ax.scatter(subset['PC1'], subset['PC2'], c=GROUP_COLORS[label],
+                      label=label, s=180, alpha=0.9, edgecolor='white', linewidth=1.5,
+                      marker='D')
+
+    ax.set_title("PCA of Viral Transcriptome Profiles", fontsize=14, fontweight='bold', pad=15)
+    ax.set_xlabel("PC1", fontsize=12, fontweight='bold')
+    ax.set_ylabel("PC2", fontsize=12, fontweight='bold')
+
+    handles = [plt.Line2D([0], [0], marker='D', color='w',
+                           markerfacecolor=GROUP_COLORS[l], markersize=10, label=l)
+               for l in LABEL_ORDER if l in pca_df['condition_label'].values]
+    ax.legend(handles=handles, loc='center left', bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9.5)
+    
+    sns.despine()
+    plt.savefig(os.path.join(OUTPUT_DIR, "Fig3B_Virus_PCA.pdf"), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("   ✅ 已保存")
+
+# ================= 5. 图3: 人样本相关性热图 =================
+def plot_human_correlation_heatmap():
+    print("🔥 绘制人样本相关性热图...")
+    expr_df = read_expression_data(os.path.join(INPUT_DIR, "Expression人.xlsx"))
+    fpkm_cols = extract_fpkm_columns(expr_df)
+
+    if not fpkm_cols:
+        fpkm_cols = [c for c in expr_df.columns if c != 'Gene_Name']
+
+    expr_matrix = expr_df[['Gene_Name'] + fpkm_cols].copy()
+    expr_matrix = expr_matrix.groupby('Gene_Name').mean()
+    expr_matrix = standardize_columns(expr_matrix, fpkm_cols)
+
+    expr_log = np.log2(expr_matrix + 1)
+
+    gene_std = expr_log.std(axis=1)
+    top_genes = gene_std.nlargest(2000).index
+    expr_subset = expr_log.loc[top_genes]
+
+    corr_matrix = expr_subset.corr(method='pearson')
+
+    # 【Bug修复】：此处 cbar_pos 配置下，Seaborn 将颜色条轴指定为 cg.cax
+    cg = sns.clustermap(
+        corr_matrix, 
+        annot=True, fmt='.2f',
+        cmap='RdYlBu_r', vmin=0.8, vmax=1.0,
+        figsize=(9, 9),
+        linewidths=1, linecolor='white',
+        cbar_pos=(0.02, 0.85, 0.03, 0.12),
+        dendrogram_ratio=(0.15, 0.15)
+    )
+
+    cg.fig.suptitle("Sample Correlation Heatmap (Human Genes)", fontsize=14, fontweight='bold', y=1.02)
+    
+    plt.setp(cg.ax_heatmap.get_xticklabels(), rotation=45, ha='right', fontsize=10)
+    plt.setp(cg.ax_heatmap.get_yticklabels(), rotation=0, fontsize=10)
+    
+    cg.ax_heatmap.set_xlabel("")
+    cg.ax_heatmap.set_ylabel("")
+    
+    # 【Bug修复】：将原有的 ax_cbar 改为正统的 cax
+    cg.cax.set_title("Pearson r", fontsize=9, pad=8)
+
+    cg.savefig(os.path.join(OUTPUT_DIR, "Fig3C_Human_Correlation_Heatmap.pdf"), dpi=300, bbox_inches='tight')
+    plt.close()
+    print("   ✅ 已保存")
+
+# ================= 6. 图4: 病毒Top高变异聚类热图 =================
+def plot_virus_topvar_heatmap():
+    print("🔥 绘制病毒Top高变异聚类热图...")
+    expr_df = read_expression_data(os.path.join(INPUT_DIR, "Expression病毒.xlsx"))
+    fpkm_cols = extract_fpkm_columns(expr_df)
+
+    if not fpkm_cols:
+        fpkm_cols = [c for c in expr_df.columns if c != 'Gene_Name']
+
+    expr_matrix = expr_df[['Gene_Name'] + fpkm_cols].copy()
+    expr_matrix = expr_matrix.groupby('Gene_Name').mean()
+    expr_matrix = standardize_columns(expr_matrix, fpkm_cols)
+
+    expr_log = np.log2(expr_matrix + 1)
+
+    gene_std = expr_log.std(axis=1)
+    top_n = min(50, len(gene_std))
+    top_genes = gene_std.nlargest(top_n).index
+    heat_data = expr_log.loc[top_genes]
+
+    cg = sns.clustermap(
+        heat_data, cmap=CMAP_HEATMAP, z_score=0,
+        vmin=-2, vmax=2, figsize=(10, 14),
+        dendrogram_ratio=(0.1, 0.15),
+        cbar_pos=(0.02, 0.85, 0.03, 0.12),
+        col_cluster=True, row_cluster=True,
+        linewidths=0.5, linecolor='white'
+    )
+
+    plt.setp(cg.ax_heatmap.get_xticklabels(), rotation=45, ha='right', fontsize=11)
+    plt.setp(cg.ax_heatmap.get_yticklabels(), rotation=0, fontsize=8)
+    
+    cg.ax_heatmap.set_xlabel("")
+    cg.ax_heatmap.set_ylabel("")
+    
+    # 【Bug修复】：将原有的 ax_cbar 改为正统的 cax
+    cg.cax.set_title("Z-score\n(Row scaled)", fontsize=9, pad=8)
+
+    cg.savefig(os.path.join(OUTPUT_DIR, "Fig3D_Virus_TopVar_ClusterHeatmap.pdf"), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"   ✅ 已保存 (Top{top_n})")
+
+# ================= 7. 主程序 =================
+if __name__ == '__main__':
+    print("=" * 60)
+    print("KSHV转录组分析 - 四图生成 (学术优化版)")
+    print("=" * 60)
+    print(f"📂 输入: {INPUT_DIR}")
+    print(f"📂 输出: {OUTPUT_DIR}\n")
+
+    plot_human_pca()
+    plot_virus_pca()
+    plot_human_correlation_heatmap()
+    plot_virus_topvar_heatmap()
+
+    print("\n" + "=" * 60)
+    print("🎉 全部完成！")
+    print("=" * 60)
+    print("\n生成文件:")
+    for f in sorted(os.listdir(OUTPUT_DIR)):
+        if f.endswith('.pdf'):
+            print(f"   📄 {f}")
