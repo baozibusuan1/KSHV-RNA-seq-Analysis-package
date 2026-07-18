@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+KSHV转录组分析 - 完整版（含 PCA、双 Venn、蓝白红热图、箱线图）
+- 标签：0h / 72h
+- 配色：Fig2‑2 风格（PCA/箱线图）+ 蓝‑白‑红（热图/Venn）
+- 新增：共上调/共下调 Venn 图
+- 箱线图增加 CADM2、RAP1GAP
+"""
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib_venn import venn2
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.gridspec import GridSpec
+from scipy.cluster.hierarchy import dendrogram, linkage, leaves_list
+from scipy.spatial.distance import pdist
+import warnings
+warnings.filterwarnings('ignore')
+
+# ================= 1. 全局配置 =================
+BASE_DIR = r"D:\博士学习\S11W3\生信改后\raw data"
+OUTPUT_DIR = BASE_DIR
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['svg.fonttype'] = 'none'
+
+# 标签映射（0h / 72h）
+LABEL_MAP = {
+    'IKCON':  'iSLK (0h)',
+    'IKT':    'iSLK (72h)',
+    'IB6CON': 'iSLK-BAC16 (0h)',
+    'IB6T':   'iSLK-BAC16 (72h)',
+    'BLCON':  'BCBL-1 (0h)',
+    'BLT':    'BCBL-1 (72h)'
+}
+
+# PCA / 箱线图配色（Fig2‑2 风格）
+C_TEAL = '#2A9D8F'
+C_TERRA = '#E76F51'
+C_DARKPURP = '#264653'
+C_MAGENTA = '#B63679'
+C_YELLOW = '#E9C46A'
+
+GROUP_COLORS = {
+    'iSLK (0h)': C_TEAL,
+    'iSLK (72h)': C_TERRA,
+    'iSLK-BAC16 (0h)': C_DARKPURP,
+    'iSLK-BAC16 (72h)': C_MAGENTA,
+    'BCBL-1 (0h)': '#457B9D',
+    'BCBL-1 (72h)': C_YELLOW
+}
+
+# 热图专用蓝‑白‑红配色
+colors = ["#2166ac", "#ffffff", "#b2182b"]
+CMAP_HEATMAP = LinearSegmentedColormap.from_list("blue_white_red", colors, N=256)
+
+# 目标基因库（箱线图用）
+TARGET_GENES_POOL = [
+    "TNIP3", "DEPTOR", "H1-4", "KLHL29", "GAL3ST4", "TRIML2",
+    "C9orf24", "OR51B4", "C1QTNF1", "GPR37L1", "RSK1/2", "ZBTB7C",
+    "CCNP", "COL20A1", "ARID3C", "CFAP58", "HEY1", "ITPRIP", "ITIH3", "PCDHA7",
+    "CADM2", "RAP1GAP"      # 新增基因
+]
+
+# ================= 2. 数据读取与清理 =================
+def load_clean_deg(filename):
+    filepath = os.path.join(BASE_DIR, filename)
+    df = pd.read_excel(filepath)
+    if 'Name' in df.columns:
+        df.rename(columns={'Name': 'Gene_Name'}, inplace=True)
+    if 'padj' in df.columns:
+        df.rename(columns={'padj': 'FDR'}, inplace=True)
+    clean_df = df[['Gene_Name', 'log2FoldChange', 'FDR']].copy()
+    clean_df.dropna(subset=['Gene_Name'], inplace=True)
+    clean_df['Gene_Name'] = clean_df['Gene_Name'].astype(str).str.strip()
+    clean_df = clean_df[~clean_df['Gene_Name'].isin(['-', 'nan', 'NaN', ''])]
+    clean_df['FDR'] = clean_df['FDR'].fillna(1.0)
+    clean_df['log2FoldChange'] = clean_df['log2FoldChange'].fillna(0)
+    return clean_df
+
+print("📂 加载数据...")
+deg_ik = load_clean_deg("IKCON_vs_IKT.DESeq0519.xlsx")
+deg_ib6 = load_clean_deg("IB6CON_vs_IB6T.DESeq0519.xlsx")
+deg_bl = load_clean_deg("BLCON_vs_BLT.DESeq0519.xlsx")
+
+pca_df = pd.read_excel(os.path.join(BASE_DIR, "PCA人.xlsx"))
+expr_df = pd.read_excel(os.path.join(BASE_DIR, "Expression0519.xlsx"))
+if 'Name' in expr_df.columns:
+    expr_df['Name'] = expr_df['Name'].astype(str).str.strip()
+
+# ================= 3. PCA 图 =================
+def plot_pca():
+    print("📈 绘制 PCA 图...")
+    pca_df['condition_label'] = pca_df['condition'].map(LABEL_MAP)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.scatterplot(
+        x='PC1', y='PC2', hue='condition_label', style='condition_label',
+        data=pca_df, palette=GROUP_COLORS, s=180, alpha=0.9, ax=ax, edgecolor='white'
+    )
+    ax.set_title("PCA of Transcriptome Profiles", fontsize=15, fontweight='bold', pad=15)
+    ax.set_xlabel("PC1", fontsize=13, fontweight='bold')
+    ax.set_ylabel("PC2", fontsize=13, fontweight='bold')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0., frameon=False)
+    sns.despine()
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "Fig3A_PCA.pdf"), dpi=300)
+    plt.close()
+
+# ================= 4. 两张 Venn 图（共上调 / 共下调）=================
+def plot_venn_combined():
+    print("🔗 绘制共上调/共下调 Venn 图...")
+    
+    def get_sig_genes(df, direction='up'):
+        if direction == 'up':
+            return set(df[(df['FDR'] < 0.05) & (df['log2FoldChange'] > 1)]['Gene_Name'])
+        else:
+            return set(df[(df['FDR'] < 0.05) & (df['log2FoldChange'] < -1)]['Gene_Name'])
+    
+    up_ib6 = get_sig_genes(deg_ib6, 'up')
+    up_bl  = get_sig_genes(deg_bl, 'up')
+    down_ib6 = get_sig_genes(deg_ib6, 'down')
+    down_bl  = get_sig_genes(deg_bl, 'down')
+    
+    # 上调 Venn
+    fig_up, ax_up = plt.subplots(figsize=(5, 5))
+    v_up = venn2([up_ib6, up_bl], set_labels=('iSLK-BAC16', 'BCBL-1'), ax=ax_up)
+    v_up.get_patch_by_id('10').set_color(C_MAGENTA)   # 仅 iSLK-BAC16
+    v_up.get_patch_by_id('01').set_color(C_YELLOW)    # 仅 BCBL-1
+    v_up.get_patch_by_id('11').set_color('#D95F02')   # 交集（橙红）
+    plt.title("Up-regulated genes (FDR<0.05, log2FC>1)", fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "Venn_Up_Combined.pdf"), dpi=300)
+    plt.close()
+    
+    # 下调 Venn
+    fig_down, ax_down = plt.subplots(figsize=(5, 5))
+    v_down = venn2([down_ib6, down_bl], set_labels=('iSLK-BAC16', 'BCBL-1'), ax=ax_down)
+    v_down.get_patch_by_id('10').set_color(C_TEAL)     # 仅 iSLK-BAC16
+    v_down.get_patch_by_id('01').set_color('#457B9D')  # 仅 BCBL-1
+    v_down.get_patch_by_id('11').set_color('#2C7BB6')  # 交集（蓝色）
+    plt.title("Down-regulated genes (FDR<0.05, log2FC<-1)", fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "Venn_Down_Combined.pdf"), dpi=300)
+    plt.close()
+    
+    print(f"   共上调基因数: {len(up_ib6 & up_bl)}")
+    print(f"   共下调基因数: {len(down_ib6 & down_bl)}")
+
+# ================= 5. 热图（蓝‑白‑红，右侧标签，细边框，水平样本标签）=================
+def build_expression_matrix():
+    """构建 BCBL-1 和 iSLK-BAC16 的四列均值矩阵（0h / 72h）"""
+    fpkm_cols = [c for c in expr_df.columns if 'fpkm' in c.lower()]
+    valid_fpkm_cols = [c for c in fpkm_cols if c.split('_')[0] in ['IB6CON', 'IB6T', 'BLCON', 'BLT']]
+    sub_expr = expr_df[['Name'] + valid_fpkm_cols].copy()
+    grouped_expr = sub_expr.groupby('Name').mean(numeric_only=True)
+    
+    final_df = pd.DataFrame(index=grouped_expr.index)
+    label_map_short = {
+        'BLCON': 'BCBL-1 (0h)',
+        'BLT': 'BCBL-1 (72h)',
+        'IB6CON': 'iSLK-BAC16 (0h)',
+        'IB6T': 'iSLK-BAC16 (72h)'
+    }
+    for prefix, label in label_map_short.items():
+        cols = [c for c in grouped_expr.columns if c.startswith(prefix)]
+        if cols:
+            final_df[label] = grouped_expr[cols].mean(axis=1)
+    desired_order = ['BCBL-1 (0h)', 'BCBL-1 (72h)', 'iSLK-BAC16 (0h)', 'iSLK-BAC16 (72h)']
+    final_df = final_df[desired_order]
+    return np.log2(final_df + 1), final_df.index
+
+def draw_heatmap_labels_right(gene_list, title_tag, filename_save):
+    if not gene_list:
+        print(f"⚠️ 跳过 {title_tag}：基因列表为空")
+        return
+    log2_matrix, all_genes = build_expression_matrix()
+    data = log2_matrix.loc[gene_list].copy()
+    # 行 Z-score
+    data = data.sub(data.mean(axis=1), axis=0).div(data.std(axis=1), axis=0)
+    data = data.fillna(0).replace([np.inf, -np.inf], 0)
+    
+    n_genes, n_samples = data.shape
+    if n_genes == 0:
+        return
+    
+    # 行聚类
+    if n_genes > 1:
+        row_linkage = linkage(pdist(data.values, metric='euclidean'), method='ward')
+        row_order = leaves_list(row_linkage)
+    else:
+        row_order = [0]
+    data_clustered = data.iloc[row_order]
+    gene_labels = data_clustered.index.tolist()
+    
+    fig_height = max(5, min(28, n_genes * 0.3))
+    fontsize_y = max(6, min(12, fig_height * 72 / (n_genes * 1.3)))
+    
+    fig = plt.figure(figsize=(8.5, fig_height))
+    gs = GridSpec(1, 2, width_ratios=[0.18, 0.82], wspace=0.03)
+    ax_dendro = fig.add_subplot(gs[0, 0])
+    ax_heatmap = fig.add_subplot(gs[0, 1])
+    
+    # 聚类树（细线半透明）
+    if n_genes > 1:
+        dendrogram(row_linkage, ax=ax_dendro, orientation='left',
+                   above_threshold_color='#2c3e50', color_threshold=0.7 * max(row_linkage[:,2]) if len(row_linkage) > 0 else None,
+                   no_labels=True)
+        for coll in ax_dendro.collections:
+            coll.set_linewidth(0.5)
+            coll.set_alpha(0.3)
+        for line in ax_dendro.lines:
+            line.set_linewidth(0.5)
+            line.set_alpha(0.3)
+    ax_dendro.set_xticks([])
+    ax_dendro.set_yticks([])
+    for spine in ax_dendro.spines.values():
+        spine.set_visible(False)
+    
+    # 热图主体
+    im = ax_heatmap.imshow(data_clustered.values, cmap=CMAP_HEATMAP, aspect='auto',
+                           vmin=-2.5, vmax=2.5, interpolation='nearest')
+    ax_heatmap.yaxis.set_ticks_position('right')
+    ax_heatmap.yaxis.set_label_position('right')
+    ax_heatmap.set_xticks(range(n_samples))
+    ax_heatmap.set_xticklabels(data.columns, fontsize=9, fontname='Arial', rotation=0, ha='center')
+    ax_heatmap.xaxis.set_tick_params(pad=4)
+    ax_heatmap.set_yticks(range(n_genes))
+    ax_heatmap.set_yticklabels(gene_labels, fontsize=fontsize_y, fontname='Arial', style='italic')
+    ax_heatmap.tick_params(axis='y', left=False, right=True, labelright=True, pad=2)
+    ax_heatmap.tick_params(axis='x', bottom=False)
+    for spine in ax_heatmap.spines.values():
+        spine.set_visible(True)
+        spine.set_color('#cccccc')
+        spine.set_linewidth(0.5)
+    ax_heatmap.set_ylim(n_genes - 0.5, -0.5)
+    
+    # 色条（顶部）
+    fig.canvas.draw()
+    bbox = ax_heatmap.get_position()
+    cbar_ax = fig.add_axes([bbox.x0, 0.92, bbox.width, 0.02])
+    cbar = fig.colorbar(im, cax=cbar_ax, orientation='horizontal')
+    cbar.set_label("Z-score", fontsize=9, fontname='Arial', labelpad=2)
+    cbar.ax.tick_params(labelsize=8)
+    cbar.outline.set_visible(False)
+    fig.subplots_adjust(top=0.92)
+    
+    plt.savefig(os.path.join(OUTPUT_DIR, f"Fig3_{filename_save}.pdf"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(OUTPUT_DIR, f"Fig3_{filename_save}.svg"), dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"✅ {title_tag} | 基因数={n_genes} | 高度={fig_height:.1f}in | 字体={fontsize_y:.1f}pt")
+
+# 准备热图的基因列表（公共上调/下调/TOP100）
+def get_combined_gene_lists():
+    sig_up_ib6 = set(deg_ib6[(deg_ib6['FDR']<0.05) & (deg_ib6['log2FoldChange']>1)]['Gene_Name'])
+    sig_up_bl  = set(deg_bl[(deg_bl['FDR']<0.05) & (deg_bl['log2FoldChange']>1)]['Gene_Name'])
+    co_up_list = list(sig_up_ib6.intersection(sig_up_bl))
+    if "TNIP3" not in co_up_list and "TNIP3" in deg_ib6['Gene_Name'].values:
+        co_up_list.append("TNIP3")
+    
+    sig_down_ib6 = set(deg_ib6[(deg_ib6['FDR']<0.05) & (deg_ib6['log2FoldChange']<-1)]['Gene_Name'])
+    sig_down_bl  = set(deg_bl[(deg_bl['FDR']<0.05) & (deg_bl['log2FoldChange']<-1)]['Gene_Name'])
+    co_down_list = list(sig_down_ib6.intersection(sig_down_bl))
+    if "TNIP3" in co_down_list:
+        co_down_list.remove("TNIP3")
+    
+    # TOP100 共上调
+    up_ib6_detail = deg_ib6[deg_ib6['Gene_Name'].isin(co_up_list)][['Gene_Name','log2FoldChange']].rename(columns={'log2FoldChange':'FC_ib6'})
+    up_bl_detail  = deg_bl[deg_bl['Gene_Name'].isin(co_up_list)][['Gene_Name','log2FoldChange']].rename(columns={'log2FoldChange':'FC_bl'})
+    up_merged = pd.merge(up_ib6_detail, up_bl_detail, on='Gene_Name', how='inner')
+    up_merged['avg_log2FC'] = (up_merged['FC_ib6'] + up_merged['FC_bl']) / 2
+    up_merged = up_merged.sort_values('avg_log2FC', ascending=False)
+    co_up_top100 = up_merged['Gene_Name'].head(100).tolist()
+    if "TNIP3" in co_up_top100 and "TNIP3" not in co_up_top100:
+        co_up_top100 = co_up_top100[:-1] + ["TNIP3"]
+    
+    return co_up_list, co_down_list, co_up_top100
+
+# ================= 6. 箱线图（增加 CADM2, RAP1GAP）=================
+def plot_boxplots():
+    print("📊 绘制箱线图...")
+    available_genes = [g for g in TARGET_GENES_POOL if g in expr_df['Name'].values]
+    # 优先展示 TNIP3 + 前几个基因，保证 CADM2 和 RAP1GAP 出现
+    plot_list = []
+    if "TNIP3" in available_genes:
+        plot_list.append("TNIP3")
+        available_genes.remove("TNIP3")
+    # 确保新增基因一定在图中
+    for new_g in ["CADM2", "RAP1GAP"]:
+        if new_g in available_genes:
+            plot_list.append(new_g)
+            available_genes.remove(new_g)
+    plot_list.extend(available_genes[:2])  # 再取两个其他基因
+    
+    if not plot_list:
+        return
+    
+    fpkm_cols = [c for c in expr_df.columns if 'fpkm' in c.lower()]
+    fig, axes = plt.subplots(1, len(plot_list), figsize=(4.5 * len(plot_list), 6))
+    if len(plot_list) == 1:
+        axes = [axes]
+    
+    order_keys = ['IKCON', 'IKT', 'IB6CON', 'IB6T', 'BLCON', 'BLT']
+    order_labels = [LABEL_MAP[k] for k in order_keys]
+    
+    for ax, gene in zip(axes, plot_list):
+        gene_row = expr_df[expr_df['Name'] == gene].iloc[0]
+        plot_data = []
+        for col in fpkm_cols:
+            val = gene_row[col]
+            cond_key = col.split('_')[0]
+            if cond_key in LABEL_MAP:
+                plot_data.append({'Condition': LABEL_MAP[cond_key], 'FPKM': float(val)})
+        df_plot = pd.DataFrame(plot_data)
+        sns.boxplot(x='Condition', y='FPKM', data=df_plot, order=order_labels,
+                    palette=GROUP_COLORS, ax=ax, width=0.5, boxprops=dict(alpha=0.7))
+        sns.stripplot(x='Condition', y='FPKM', data=df_plot, order=order_labels,
+                      color="black", size=5, jitter=True, ax=ax)
+        ax.set_title(f"{gene}", fontsize=15, fontweight='bold', style='italic')
+        ax.set_ylabel("Expression (FPKM)", fontsize=12)
+        ax.set_xlabel("")
+        ax.set_xticklabels(order_labels, rotation=45, ha='right', fontsize=10)
+        sns.despine(ax=ax)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "Fig3E_Selected_Genes_Boxplot.pdf"), dpi=300)
+    plt.close()
+
+# ================= 7. 主程序 =================
+if __name__ == '__main__':
+    plot_pca()
+    plot_venn_combined()
+    
+    # 准备热图基因列表
+    co_up, co_down, co_up_top100 = get_combined_gene_lists()
+    print("\n🔥 生成蓝‑白‑红热图...")
+    draw_heatmap_labels_right(co_up,    "显著公共上调组 (含TNIP3)",      "Co_Up_Heatmap")
+    draw_heatmap_labels_right(co_down,  "显著公共下调组 (排除TNIP3)",    "Co_Down_Heatmap")
+    draw_heatmap_labels_right(co_up_top100, "显著公共上调 TOP100 (含TNIP3)", "Top100_Up_Heatmap")
+    
+    plot_boxplots()
+    print("\n🎉 全部完成！所有图片已保存至：", OUTPUT_DIR)
